@@ -1,0 +1,6 @@
+fastapi>=0.68.0
+uvicorn>=0.15.0
+aiohttp>=3.8.0
+nevergrad>=0.4.3
+rich>=10.0.0
+websockets>=10.0 

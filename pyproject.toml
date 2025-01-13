@@ -1,0 +1,35 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "quantum_opt"
+version = "0.1.0"
+description = "High performance optimization framework for quantum optimal control with web visualization"
+authors = [
+    { name = "Jiakai Wang", email = "jiakai.wang@example.com" }
+]
+readme = "README.md"
+license = "MIT"
+dependencies = [
+    "numpy>=1.20.0",
+    "scipy>=1.7.0",
+    "nevergrad>=0.8.0",
+    "qutip>=4.7.0",
+    "matplotlib>=3.5.0",
+    "fastapi>=0.100.0",
+    "uvicorn>=0.24.0",
+    "websockets>=11.0.0",
+    "pydantic>=2.0.0",
+    "python-multipart>=0.0.6"
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "black>=22.0.0",
+    "isort>=5.0.0",
+    "mypy>=1.0.0",
+    "pytest-asyncio>=0.21.0",
+    "httpx>=0.24.0"
+] 
