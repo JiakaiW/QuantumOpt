@@ -7,9 +7,19 @@ from .api_schemas import OptimizationConfig, TaskResponse, TaskState, APIRespons
 from ...dependencies import get_task_queue, get_websocket_manager
 from .....queue import TaskQueue
 from .....utils.events import create_api_response
+from .queue import router as queue_router
+from ....backend.websocket_manager import WebSocketManager
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+# Include queue router
+router.include_router(queue_router, prefix="/queue", tags=["queue"])
+
+@router.get("/health")
+async def health_check() -> Dict[str, str]:
+    """Health check endpoint."""
+    return {"status": "ok"}
 
 @router.post("/tasks", response_model=APIResponse)
 async def create_task(
@@ -34,36 +44,44 @@ async def create_task(
             error={"message": str(e)}
         )
 
-@router.post("/tasks/{task_id}/pause", response_model=APIResponse)
-async def pause_task(
-    task_id: str, 
+@router.post("/tasks/{task_id}/start", response_model=APIResponse)
+async def start_task(
+    task_id: str,
     task_queue: TaskQueue = Depends(get_task_queue)
 ) -> Dict[str, Any]:
-    """Pause a running task."""
+    """Start a task."""
     try:
-        success = await task_queue.pause_task(task_id)
-        if not success:
-            task = await task_queue.get_task(task_id)
-            if not task:
-                return create_api_response(
-                    status="error",
-                    error={"message": f"Task {task_id} not found"}
-                )
-            return create_api_response(
-                status="error",
-                error={"message": f"Cannot pause task {task_id}: current status is {task['status']}"}
-            )
-        
         task = await task_queue.get_task(task_id)
         if not task:
-            return create_api_response(
-                status="error",
-                error={"message": f"Task {task_id} not found after pausing"}
-            )
-            
+            raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+        
+        await task_queue.start_task(task_id)
         return create_api_response(
             status="success",
-            data=TaskState(**task).model_dump()
+            data={"task_id": task_id, "status": "running"}
+        )
+    except Exception as e:
+        logger.error(f"Error starting task {task_id}: {e}")
+        return create_api_response(
+            status="error",
+            error={"message": str(e)}
+        )
+
+@router.post("/tasks/{task_id}/pause", response_model=APIResponse)
+async def pause_task(
+    task_id: str,
+    task_queue: TaskQueue = Depends(get_task_queue)
+) -> Dict[str, Any]:
+    """Pause a task."""
+    try:
+        task = await task_queue.get_task(task_id)
+        if not task:
+            raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+        
+        await task_queue.pause_task(task_id)
+        return create_api_response(
+            status="success",
+            data={"task_id": task_id, "status": "paused"}
         )
     except Exception as e:
         logger.error(f"Error pausing task {task_id}: {e}")
@@ -74,34 +92,19 @@ async def pause_task(
 
 @router.post("/tasks/{task_id}/resume", response_model=APIResponse)
 async def resume_task(
-    task_id: str, 
+    task_id: str,
     task_queue: TaskQueue = Depends(get_task_queue)
 ) -> Dict[str, Any]:
-    """Resume a paused task."""
+    """Resume a task."""
     try:
-        success = await task_queue.resume_task(task_id)
-        if not success:
-            task = await task_queue.get_task(task_id)
-            if not task:
-                return create_api_response(
-                    status="error",
-                    error={"message": f"Task {task_id} not found"}
-                )
-            return create_api_response(
-                status="error",
-                error={"message": f"Cannot resume task {task_id}: current status is {task['status']}"}
-            )
-        
         task = await task_queue.get_task(task_id)
         if not task:
-            return create_api_response(
-                status="error",
-                error={"message": f"Task {task_id} not found after resuming"}
-            )
-            
+            raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+        
+        await task_queue.resume_task(task_id)
         return create_api_response(
             status="success",
-            data=TaskState(**task).model_dump()
+            data={"task_id": task_id, "status": "running"}
         )
     except Exception as e:
         logger.error(f"Error resuming task {task_id}: {e}")
@@ -112,28 +115,19 @@ async def resume_task(
 
 @router.post("/tasks/{task_id}/stop", response_model=APIResponse)
 async def stop_task(
-    task_id: str, 
+    task_id: str,
     task_queue: TaskQueue = Depends(get_task_queue)
 ) -> Dict[str, Any]:
     """Stop a task."""
     try:
-        success = await task_queue.stop_task(task_id)
-        if not success:
-            return create_api_response(
-                status="error",
-                error={"message": f"Task {task_id} not found"}
-            )
-        
         task = await task_queue.get_task(task_id)
         if not task:
-            return create_api_response(
-                status="error",
-                error={"message": f"Task {task_id} not found after stopping"}
-            )
-            
+            raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+        
+        await task_queue.stop_task(task_id)
         return create_api_response(
             status="success",
-            data=TaskState(**task).model_dump()
+            data={"task_id": task_id, "status": "stopped"}
         )
     except Exception as e:
         logger.error(f"Error stopping task {task_id}: {e}")
@@ -188,47 +182,42 @@ async def list_tasks(
 @router.websocket("/ws")
 async def websocket_endpoint(
     websocket: WebSocket,
-    client_id: Optional[str] = Query(None),
-    websocket_manager = Depends(get_websocket_manager)
-):
-    """WebSocket endpoint for real-time task updates."""
-    # Generate client ID if not provided
-    if not client_id:
-        client_id = str(uuid.uuid4())
+    task_queue: TaskQueue = Depends(get_task_queue),
+    websocket_manager: WebSocketManager = Depends(get_websocket_manager)
+) -> None:
+    """WebSocket endpoint for real-time task updates.
+    
+    Args:
+        websocket: The WebSocket connection
+        task_queue: The task queue instance
+        websocket_manager: The WebSocket manager instance
+    """
+    client_id = str(uuid.uuid4())  # Generate unique client ID
+    logger.info(f"WebSocket connection request from client {client_id}")
     
     try:
-        # Accept connection and send client ID
+        await websocket.accept()
         await websocket_manager.connect(websocket, client_id)
-        await websocket.send_json(
-            create_api_response(
-                status="success",
-                data={
-                    "type": "CONNECTED",
-                    "client_id": client_id
-                }
-            )
-        )
         
-        # Handle messages
         while True:
             try:
                 data = await websocket.receive_json()
-                # Validate message format
-                message = WebSocketMessage(**data)
-                await websocket_manager.handle_client_message(websocket, message.model_dump())
+                await websocket_manager.handle_client_message(websocket, data)
             except WebSocketDisconnect:
                 logger.info(f"Client {client_id} disconnected")
+                await websocket_manager.disconnect(websocket, client_id)
                 break
             except Exception as e:
-                logger.error(f"Error handling WebSocket message from client {client_id}: {e}")
-                await websocket.send_json(
-                    create_api_response(
-                        status="error",
-                        error={"message": str(e)}
-                    )
-                )
+                logger.error(f"Error handling WebSocket message: {e}")
+                try:
+                    await websocket.close(code=1011, reason=str(e))
+                except:
+                    pass
+                break
+                
     except Exception as e:
         logger.error(f"WebSocket error for client {client_id}: {e}")
-    finally:
-        # Handle disconnection with client ID
-        await websocket_manager.disconnect(websocket, client_id) 
+        try:
+            await websocket.close(code=1011, reason=str(e))
+        except:
+            pass 

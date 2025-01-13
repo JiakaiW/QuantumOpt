@@ -92,6 +92,16 @@ python examples/queue_example.py
 ```
 
 The web interface will be available at:
-- Frontend: http://localhost:5173
-- Backend API: http://localhost:8000
-- WebSocket: ws://localhost:8000/api/ws/queue 
+- Frontend & API: http://localhost:8000
+- WebSocket: ws://localhost:8000/api/v1/ws
+
+### Task States
+Tasks can be in one of the following states:
+- `pending`: Task is queued but not yet started
+- `running`: Task is currently executing
+- `paused`: Task execution is temporarily suspended
+- `completed`: Task has finished successfully
+- `failed`: Task encountered an error during execution
+- `stopped`: Task was manually stopped by user
+
+Each state transition triggers appropriate events that are broadcast to connected clients via WebSocket. 

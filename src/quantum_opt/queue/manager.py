@@ -18,6 +18,17 @@ class TaskQueue(EventEmitter):
         self._processing_task: Optional[asyncio.Task] = None
         self._stopped = True
         self._is_paused = False
+        self._current_task: Optional[str] = None
+        
+    @property
+    def is_processing(self) -> bool:
+        """Whether the queue is currently processing tasks."""
+        return not self._stopped
+        
+    @property
+    def is_paused(self) -> bool:
+        """Whether the queue is paused."""
+        return self._is_paused
         
     async def add_task(self, config: Dict[str, Any]) -> None:
         """Add a task to the queue.
@@ -73,10 +84,56 @@ class TaskQueue(EventEmitter):
         return [task.to_dict() for task in self._tasks.values()]
     
     async def start_processing(self) -> None:
-        """Start processing tasks in the queue sequentially."""
-        logger.info("Starting task queue processing")
+        """Start processing tasks in the queue."""
+        if not self._stopped:
+            logger.warning("Queue is already processing")
+            return
+            
         self._stopped = False
         self._is_paused = False
+        self._processing_task = asyncio.create_task(self._process_tasks())
+        
+    async def pause_processing(self) -> None:
+        """Pause queue processing."""
+        if self._stopped:
+            logger.warning("Queue is not processing")
+            return
+            
+        self._is_paused = True
+        if self._current_task:
+            await self.pause_task(self._current_task)
+            
+    async def resume_processing(self) -> None:
+        """Resume queue processing."""
+        if self._stopped:
+            logger.warning("Queue is not processing")
+            return
+            
+        self._is_paused = False
+        if self._current_task:
+            await self.resume_task(self._current_task)
+            
+    async def stop_processing(self) -> None:
+        """Stop queue processing."""
+        if self._stopped:
+            logger.warning("Queue is already stopped")
+            return
+            
+        self._stopped = True
+        if self._current_task:
+            await self.stop_task(self._current_task)
+            
+        if self._processing_task:
+            self._processing_task.cancel()
+            try:
+                await self._processing_task
+            except asyncio.CancelledError:
+                pass
+            self._processing_task = None
+            
+    async def _process_tasks(self) -> None:
+        """Process tasks in the queue sequentially."""
+        logger.info("Starting task queue processing")
         
         await self.emit(create_task_event(
             event_type=EventType.QUEUE_STARTED,
@@ -84,34 +141,43 @@ class TaskQueue(EventEmitter):
             status="running"
         ))
         
-        while not self._stopped:
-            if self._is_paused:
-                await asyncio.sleep(0.1)
-                continue
+        try:
+            while not self._stopped:
+                if self._is_paused:
+                    await asyncio.sleep(0.1)
+                    continue
+                    
+                # Find next pending task
+                pending_tasks = [
+                    task for task in self._tasks.values()
+                    if task.status == "pending"
+                ]
                 
-            # Find next pending task
-            pending_tasks = [
-                task for task in self._tasks.values()
-                if task.status == "pending"
-            ]
+                if not pending_tasks:
+                    await asyncio.sleep(0.1)
+                    continue
+                    
+                # Process next task
+                task = pending_tasks[0]
+                self._current_task = task.task_id
+                try:
+                    await task.start_optimization()
+                except Exception as e:
+                    logger.error(f"Error processing task {task.task_id}: {e}")
+                finally:
+                    self._current_task = None
+                    
+        except asyncio.CancelledError:
+            logger.info("Task processing cancelled")
+            raise
+        finally:
+            self._current_task = None
+            await self.emit(create_task_event(
+                event_type=EventType.QUEUE_STOPPED,
+                task_id="queue",
+                status="stopped"
+            ))
             
-            if not pending_tasks:
-                await asyncio.sleep(0.1)
-                continue
-                
-            # Process next task
-            task = pending_tasks[0]
-            try:
-                await task.start_optimization()
-            except Exception as e:
-                logger.error(f"Error processing task {task.task_id}: {e}")
-                
-        await self.emit(create_task_event(
-            event_type=EventType.QUEUE_STOPPED,
-            task_id="queue",
-            status="stopped"
-        ))
-    
     async def stop_task(self, task_id: str) -> bool:
         """Stop a specific task.
         
@@ -163,3 +229,24 @@ class TaskQueue(EventEmitter):
     async def _forward_task_event(self, event: Event) -> None:
         """Forward events from tasks."""
         await self.emit(event) 
+    
+    async def start_task(self, task_id: str) -> bool:
+        """Start a specific task.
+        
+        Args:
+            task_id: The task ID to start
+            
+        Returns:
+            bool: True if task was started, False otherwise
+        """
+        if task_id not in self._tasks:
+            logger.warning(f"Task {task_id} not found in queue")
+            return False
+            
+        task = self._tasks[task_id]
+        try:
+            await task.start_optimization()
+            return True
+        except Exception as e:
+            logger.error(f"Error starting task {task_id}: {e}")
+            return False 

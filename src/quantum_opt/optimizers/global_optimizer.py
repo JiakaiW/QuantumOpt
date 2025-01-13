@@ -76,8 +76,10 @@ class MultiprocessingGlobalOptimizer(BaseParallelOptimizer):
             Exception: If evaluation fails, the original error is propagated
         """
         try:
+            # Convert string to callable if needed
+            fn = eval(self.config.objective_fn) if isinstance(self.config.objective_fn, str) else self.config.objective_fn
             # Call objective function with unpacked parameters
-            result = self.config.objective_fn(**candidate)
+            result = fn(**candidate)
             return float(result)
         except Exception as e:
             logger.error(f"Error evaluating candidate: {str(e)}")

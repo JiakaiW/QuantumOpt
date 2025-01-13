@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Quantum Optimization - Simple UI</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        .control-panel {
+            margin: 20px 0;
+            padding: 10px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+        }
+        .status {
+            margin: 10px 0;
+            padding: 10px;
+            background-color: #f5f5f5;
+            border-radius: 4px;
+        }
+        .progress-bar {
+            width: 100%;
+            height: 20px;
+            background-color: #f0f0f0;
+            border-radius: 10px;
+            overflow: hidden;
+        }
+        .progress-bar-fill {
+            height: 100%;
+            background-color: #4CAF50;
+            width: 0%;
+            transition: width 0.3s ease;
+        }
+        .log {
+            margin-top: 20px;
+            padding: 10px;
+            background-color: #f8f8f8;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            height: 200px;
+            overflow-y: auto;
+            font-family: monospace;
+        }
+    </style>
+</head>
+<body>
+    <h1>Quantum Optimization Test UI</h1>
+    
+    <div class="control-panel">
+        <h2>Task Control</h2>
+        <button id="createTask">Create Task</button>
+        <button id="startQueue">Start Queue</button>
+        <button id="stopQueue">Stop Queue</button>
+    </div>
+
+    <div class="status">
+        <h2>Status</h2>
+        <p>Task ID: <span id="taskId">None</span></p>
+        <p>Status: <span id="taskStatus">None</span></p>
+        <div class="progress-bar">
+            <div id="progressBar" class="progress-bar-fill"></div>
+        </div>
+        <p>Best Value: <span id="bestValue">N/A</span></p>
+        <p>Parameters: <span id="parameters">N/A</span></p>
+    </div>
+
+    <div class="log" id="log">
+        <!-- Log messages will be added here -->
+    </div>
+
+    <script>
+        // Configuration
+        const API_BASE = '/api/v1';
+        let currentTaskId = null;
+        let ws = null;
+
+        // Helper function to log messages
+        function log(message) {
+            const logDiv = document.getElementById('log');
+            const entry = document.createElement('div');
+            entry.textContent = `${new Date().toISOString()} - ${message}`;
+            logDiv.appendChild(entry);
+            logDiv.scrollTop = logDiv.scrollHeight;
+        }
+
+        // Update UI with task status
+        function updateStatus(status) {
+            document.getElementById('taskStatus').textContent = status;
+        }
+
+        // Update progress bar
+        function updateProgress(progress) {
+            const progressBar = document.getElementById('progressBar');
+            progressBar.style.width = `${progress}%`;
+        }
+
+        // Create a new optimization task
+        async function createTask() {
+            const config = {
+                name: "Simple Quadratic",
+                parameter_config: {
+                    x: {
+                        lower_bound: -5.0,
+                        upper_bound: 5.0,
+                        init: 0.0,
+                        scale: "linear"
+                    },
+                    y: {
+                        lower_bound: -5.0,
+                        upper_bound: 5.0,
+                        init: 0.0,
+                        scale: "linear"
+                    }
+                },
+                optimizer_config: {
+                    optimizer_type: "CMA",
+                    budget: 10,
+                    num_workers: 1
+                },
+                objective_fn: `def objective(x: float, y: float) -> float:
+    """Quadratic function with minimum at (1, 1)."""
+    return (x - 1.0)**2 + (y - 1.0)**2
+`
+            };
+
+            try {
+                const response = await fetch(`${API_BASE}/tasks`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(config)
+                });
+                const data = await response.json();
+                
+                if (data.status === 'success') {
+                    currentTaskId = data.data.task_id;
+                    document.getElementById('taskId').textContent = currentTaskId;
+                    log(`Created task: ${currentTaskId}`);
+                    connectWebSocket();
+                } else {
+                    log(`Error creating task: ${data.error?.message || 'Unknown error'}`);
+                }
+            } catch (error) {
+                log(`Error: ${error.message}`);
+            }
+        }
+
+        // Start the optimization queue
+        async function startQueue() {
+            try {
+                const response = await fetch(`${API_BASE}/queue/control`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ action: 'start' })
+                });
+                const data = await response.json();
+                log(`Queue ${data.status === 'success' ? 'started' : 'failed to start'}`);
+            } catch (error) {
+                log(`Error: ${error.message}`);
+            }
+        }
+
+        // Stop the optimization queue
+        async function stopQueue() {
+            try {
+                const response = await fetch(`${API_BASE}/queue/control`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ action: 'stop' })
+                });
+                const data = await response.json();
+                log(`Queue ${data.status === 'success' ? 'stopped' : 'failed to stop'}`);
+            } catch (error) {
+                log(`Error: ${error.message}`);
+            }
+        }
+
+        // Connect to WebSocket for real-time updates
+        function connectWebSocket() {
+            if (ws) {
+                ws.close();
+            }
+
+            ws = new WebSocket(`ws://${window.location.host}${API_BASE}/ws`);
+            
+            ws.onopen = () => {
+                log('WebSocket connected');
+            };
+            
+            ws.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                if (data.status === 'success') {
+                    const eventData = data.data;
+                    
+                    if (eventData.type === 'ITERATION_COMPLETED' && eventData.task_id === currentTaskId) {
+                        const progress = (eventData.iteration / eventData.total_iterations) * 100;
+                        updateProgress(progress);
+                        document.getElementById('bestValue').textContent = eventData.best_y.toFixed(6);
+                        document.getElementById('parameters').textContent = 
+                            `x: ${eventData.best_x.x.toFixed(3)}, y: ${eventData.best_x.y.toFixed(3)}`;
+                        log(`Progress: ${progress.toFixed(1)}% - Value: ${eventData.best_y.toFixed(6)}`);
+                    } else if (eventData.type === 'TASK_STATUS_CHANGED' && eventData.task_id === currentTaskId) {
+                        updateStatus(eventData.status);
+                        log(`Task status: ${eventData.status}`);
+                    }
+                }
+            };
+            
+            ws.onclose = () => {
+                log('WebSocket disconnected');
+            };
+            
+            ws.onerror = (error) => {
+                log(`WebSocket error: ${error.message}`);
+            };
+        }
+
+        // Set up event listeners
+        document.getElementById('createTask').addEventListener('click', createTask);
+        document.getElementById('startQueue').addEventListener('click', startQueue);
+        document.getElementById('stopQueue').addEventListener('click', stopQueue);
+
+        // Initial log message
+        log('UI initialized');
+    </script>
+</body>
+</html> 

@@ -134,18 +134,21 @@ async def test_task_control_with_string_objective(task_queue: TaskQueue, task_co
     success = await task_queue.pause_task(task_id)
     assert success
     task = await task_queue.get_task(task_id)
+    assert task is not None, f"Task {task_id} not found"
     assert task["status"] == "paused"
     
     # Test resume
     success = await task_queue.resume_task(task_id)
     assert success
     task = await task_queue.get_task(task_id)
+    assert task is not None, f"Task {task_id} not found"
     assert task["status"] == "running"
     
     # Test stop
     success = await task_queue.stop_task(task_id)
     assert success
     task = await task_queue.get_task(task_id)
+    assert task is not None, f"Task {task_id} not found"
     assert task["status"] == "stopped"
     
     # Cleanup

@@ -85,9 +85,10 @@ class BaseParallelOptimizer(EventEmitter):
                             raise result
                             
                         # Update optimizer
-                        value = float(result)
-                        self._optimizer.tell(candidate, value)
-                        remaining_budget -= 1
+                        if isinstance(result, (int, float)):
+                            value = float(result)
+                            self._optimizer.tell(candidate, value)
+                            remaining_budget -= 1
                         
                         # Update best result
                         if value < self._best_value:

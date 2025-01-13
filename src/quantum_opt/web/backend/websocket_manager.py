@@ -68,6 +68,7 @@ class WebSocketManager(EventEmitter):
         """
         self._task_queue = task_queue
         task_queue.add_subscriber(self._handle_queue_event)
+        logger.info("WebSocket manager initialized with task queue")
         
     async def connect(self, websocket: WebSocket, client_id: str) -> None:
         """Accept a new WebSocket connection.
@@ -83,30 +84,40 @@ class WebSocketManager(EventEmitter):
             RuntimeError: If task queue is not initialized
         """
         if not self._task_queue:
+            logger.error("Task queue not initialized in WebSocket manager")
             raise RuntimeError("Task queue not initialized")
             
-        await websocket.accept()
-        self._connections.add(websocket)
-        self._reconnect_attempts[client_id] = 0
-        
-        # Send initial state
-        tasks = await self._task_queue.list_tasks()
-        queue_status = {
-            "current_task": self._task_queue._current_task,
-            "is_paused": self._task_queue._is_paused,
-            "is_stopped": self._task_queue._stopped
-        }
-        
-        await websocket.send_json(
-            create_api_response(
-                status="success",
-                data={
-                    "type": "INITIAL_STATE",
-                    "tasks": [task.to_dict() for task in tasks],
-                    "queue_status": queue_status
-                }
+        try:
+            logger.info(f"Adding client {client_id} to WebSocket connections")
+            self._connections.add(websocket)
+            self._reconnect_attempts[client_id] = 0
+            
+            # Send initial state
+            tasks = await self._task_queue.list_tasks()
+            queue_status = {
+                "active_task_id": self._task_queue._current_task,
+                "task_count": len(tasks),
+                "is_processing": self._task_queue.is_processing,
+                "is_paused": self._task_queue.is_paused
+            }
+            
+            logger.debug(f"Initial state for client {client_id}: {queue_status}")
+            await websocket.send_json(
+                create_api_response(
+                    status="success",
+                    data={
+                        "type": "INITIAL_STATE",
+                        "tasks": tasks,
+                        "queue_status": queue_status
+                    }
+                )
             )
-        )
+            logger.info(f"Client {client_id} successfully connected")
+        except Exception as e:
+            logger.error(f"Error connecting client {client_id}: {e}", exc_info=True)
+            if websocket in self._connections:
+                self._connections.remove(websocket)
+            raise
         
     async def disconnect(self, websocket: WebSocket, client_id: str) -> None:
         """Handle client disconnection.
@@ -139,15 +150,18 @@ class WebSocketManager(EventEmitter):
         for connection in self._connections:
             try:
                 await connection.send_json(message)
+                logger.debug("Successfully sent message to client")
             except WebSocketDisconnect:
+                logger.warning("Client disconnected during broadcast")
                 disconnected.add(connection)
             except Exception as e:
-                logger.error(f"Error broadcasting message: {e}")
+                logger.error(f"Error broadcasting message: {e}", exc_info=True)
                 disconnected.add(connection)
                 
         # Clean up disconnected clients
         for connection in disconnected:
             self._connections.remove(connection)
+            logger.info("Removed disconnected client")
             
     async def _handle_queue_event(self, event: Event) -> None:
         """Handle events from the task queue.
@@ -158,6 +172,7 @@ class WebSocketManager(EventEmitter):
         Args:
             event: The event to process and broadcast
         """
+        logger.debug(f"Received queue event: {event.to_dict()}")
         # Add event to buffer
         message = create_api_response(
             status="success",
@@ -168,6 +183,7 @@ class WebSocketManager(EventEmitter):
             self._event_buffer.pop(0)
             
         # Broadcast to all clients
+        logger.debug(f"Broadcasting event to {len(self._connections)} clients")
         await self.broadcast(message)
         
     async def handle_client_message(self, websocket: WebSocket, message: Dict[str, Any]) -> None:

@@ -18,7 +18,7 @@ app = FastAPI(title="QuantumOpt API")
 # Enable CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*", "file://", "null"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

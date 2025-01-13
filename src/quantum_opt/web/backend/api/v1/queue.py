@@ -1,11 +1,14 @@
 """Queue management API endpoints."""
 from typing import Dict, Any
 from fastapi import APIRouter, Depends
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from quantum_opt.queue import TaskQueue
 from ..dependencies import get_task_queue
 from .....utils.events import create_api_response
+from .api_schemas import APIResponse
+import logging
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
 class QueueStatus(BaseModel):
@@ -19,8 +22,8 @@ class QueueControl(BaseModel):
     """Request model for queue control."""
     action: str = Field(..., description="Action to perform (start/pause/resume/stop)")
     
-    @validator("action")
-    def action_must_be_valid(cls, v):
+    @field_validator("action")
+    def action_must_be_valid(cls, v: str) -> str:
         """Validate that action is one of the allowed values."""
         allowed = {"start", "pause", "resume", "stop"}
         if v not in allowed:
@@ -33,11 +36,12 @@ async def get_queue_status(
 ) -> Dict[str, Any]:
     """Get current queue status."""
     try:
+        tasks = await task_queue.list_tasks()
         status = QueueStatus(
-            active_task_id=task_queue._current_task,
-            task_count=len(await task_queue.list_tasks()),
-            is_processing=not task_queue._stopped,
-            is_paused=task_queue._is_paused
+            active_task_id=None,  # We'll need to add this to TaskQueue if needed
+            task_count=len(tasks),
+            is_processing=task_queue.is_processing,  # Add these properties to TaskQueue
+            is_paused=task_queue.is_paused
         )
         return create_api_response(
             status="success",
@@ -60,18 +64,19 @@ async def control_queue(
         if control.action == "start":
             await task_queue.start_processing()
         elif control.action == "pause":
-            await task_queue.pause()
+            await task_queue.pause_processing()  # Changed to match TaskQueue method
         elif control.action == "resume":
-            await task_queue.resume()
+            await task_queue.resume_processing()  # Changed to match TaskQueue method
         elif control.action == "stop":
-            await task_queue.stop()
+            await task_queue.stop_processing()  # Changed to match TaskQueue method
         
         # Get updated status after action
+        tasks = await task_queue.list_tasks()
         status = QueueStatus(
-            active_task_id=task_queue._current_task,
-            task_count=len(await task_queue.list_tasks()),
-            is_processing=not task_queue._stopped,
-            is_paused=task_queue._is_paused
+            active_task_id=None,  # We'll need to add this to TaskQueue if needed
+            task_count=len(tasks),
+            is_processing=task_queue.is_processing,  # Add these properties to TaskQueue
+            is_paused=task_queue.is_paused
         )
         return create_api_response(
             status="success",

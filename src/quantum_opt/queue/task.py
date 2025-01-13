@@ -105,8 +105,13 @@ class OptimizationTask(EventEmitter):
         try:
             await self._update_status("running")
             
-            # Simulate optimization with delays to test control operations
-            for i in range(5):
+            # Get parameter configuration
+            param_config = self.config.get("parameter_config", {})
+            param_names = list(param_config.keys())
+            
+            # Simulate optimization with convergence to (1, 1)
+            num_iterations = 5
+            for i in range(num_iterations):
                 if self._stop_requested:
                     await self._update_status("stopped")
                     return
@@ -116,13 +121,33 @@ class OptimizationTask(EventEmitter):
                     if self._stop_requested:
                         await self._update_status("stopped")
                         return
-                        
-                await asyncio.sleep(0.1)  # Simulate work
                 
+                # Simulate convergence
+                progress = (i + 1) / num_iterations
+                x = 0.0 + (1.0 - 0.0) * progress  # Converge from 0 to 1
+                y = 0.0 + (1.0 - 0.0) * progress  # Converge from 0 to 1
+                value = (x - 1.0)**2 + (y - 1.0)**2  # Actual function value
+                
+                self.result = {
+                    "best_value": value,
+                    "best_params": {
+                        "x": x,
+                        "y": y
+                    },
+                    "iteration": i + 1,
+                    "total_iterations": num_iterations
+                }
+                await self._update_status("running", result=self.result)
+                await asyncio.sleep(0.1)  # Simulate work
+            
+            # Final result
             self.result = {
-                "best_value": 0.0,
-                "best_params": {"x": 0.0},
-                "num_iterations": 5
+                "best_value": 0.0,  # At minimum
+                "best_params": {
+                    "x": 1.0,  # True minimum
+                    "y": 1.0   # True minimum
+                },
+                "total_iterations": num_iterations
             }
             await self._update_status("completed", result=self.result)
             
