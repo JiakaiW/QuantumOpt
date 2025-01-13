@@ -1,122 +1,176 @@
-from typing import Optional, Dict, Any, Callable
-import os
+"""Base class for parallel optimizers."""
+import asyncio
 import logging
-import time
-from datetime import datetime
-import pickle
-from abc import ABC, abstractmethod
-from multiprocessing import Pool
-from ..visualization.progress_tracking import OptimizationProgressTracker
+from typing import Dict, Any, Optional, List, Tuple
 
-class BaseParallelOptimizer(ABC):
-    """Base class for parallel optimization implementations."""
+import nevergrad as ng
+
+from ..utils.events import EventEmitter, EventType, Event, create_task_event
+from .optimization_schemas import OptimizationConfig
+
+logger = logging.getLogger(__name__)
+
+class BaseParallelOptimizer(EventEmitter):
+    """Base class for parallel optimizers."""
     
-    def __init__(self,
-                 objective_fn: Callable,
-                 parameter_config: Dict[str, Dict[str, Any]],
-                 optimizer_config: Dict[str, Any],
-                 execution_config: Dict[str, Any]):
+    def __init__(self, config: OptimizationConfig, task_id: Optional[str] = None):
         """Initialize base optimizer.
         
         Args:
-            objective_fn: Function to optimize
-            parameter_config: Configuration for parameters being optimized
-            optimizer_config: Configuration for the optimizer
-            execution_config: Configuration for execution environment
-                {
-                    "checkpoint_dir": str,     # Directory for checkpoints
-                    "log_file": str,           # Log file path
-                    "precompile": bool,        # Whether to precompile functions
-                    "log_level": str           # Logging level
-                }
+            config: Optimizer configuration containing parameter bounds, optimizer settings,
+                   and objective function
+            task_id: Optional task ID for event tracking
         """
-        self.objective_fn = objective_fn
-        self.parameter_config = parameter_config
-        self.optimizer_config = optimizer_config
-        self.execution_config = execution_config
+        super().__init__()
+        self.config = config
+        self.task_id = task_id
+        self._stopped = False
+        self._optimizer: Optional[ng.optimizers.base.Optimizer] = None
+        self._best_value = float('inf')
+        self._best_params = None
         
-        # Set up directories
-        os.makedirs(execution_config["checkpoint_dir"], exist_ok=True)
+    async def optimize(self) -> Dict[str, Any]:
+        """Run the optimization process.
         
-        # Set up logging
-        self._setup_logging()
+        Returns:
+            Dict[str, Any]: The optimization result containing:
+                - best_params: Parameters giving best result
+                - best_value: Best objective value found
+                - total_evaluations: Number of evaluations completed
+            
+        Raises:
+            RuntimeError: If optimization fails
+            ValueError: If candidate evaluation fails
+        """
+        try:
+            # Create optimizer
+            optimizer = self._create_optimizer()
+            if optimizer is None:
+                raise RuntimeError("Failed to create optimizer")
+            self._optimizer = optimizer
+                
+            # Get number of workers and budget
+            num_workers = self.config.optimizer_config.num_workers
+            remaining_budget = self.config.optimizer_config.budget
+            
+            while not self._stopped and remaining_budget > 0:
+                # Ask for candidates
+                candidates = []
+                for _ in range(min(num_workers, remaining_budget)):
+                    try:
+                        candidate = self._optimizer.ask()
+                        candidates.append(candidate)
+                    except Exception as e:
+                        logger.error(f"Error asking for candidate: {e}")
+                        raise RuntimeError(f"Failed to generate candidate: {e}")
+                
+                if not candidates:
+                    break
+                
+                # Evaluate candidates
+                try:
+                    # Create evaluation tasks
+                    eval_tasks = [
+                        self._evaluate_candidate_wrapper(candidate)
+                        for candidate in candidates
+                    ]
+                    
+                    # Wait for all evaluations to complete
+                    results = await asyncio.gather(*eval_tasks, return_exceptions=True)
+                    
+                    # Process results
+                    for candidate, result in zip(candidates, results):
+                        if isinstance(result, Exception):
+                            # Re-raise the exception to stop optimization
+                            raise result
+                            
+                        # Update optimizer
+                        value = float(result)
+                        self._optimizer.tell(candidate, value)
+                        remaining_budget -= 1
+                        
+                        # Update best result
+                        if value < self._best_value:
+                            self._best_value = value
+                            self._best_params = candidate.kwargs
+                            
+                            # Emit event
+                            if self.task_id:
+                                await self.emit(create_task_event(
+                                    event_type=EventType.ITERATION_COMPLETED,
+                                    task_id=self.task_id,
+                                    best_x=self._best_params,
+                                    best_y=self._best_value
+                                ))
+                        
+                        # Always emit iteration event
+                        await self.emit(create_task_event(
+                            event_type=EventType.ITERATION_COMPLETED,
+                            task_id=self.task_id or "test",
+                            best_x=self._best_params or candidate.kwargs,
+                            best_y=self._best_value
+                        ))
+                                
+                except Exception as e:
+                    logger.error(f"Error processing batch: {e}")
+                    raise
+                    
+            # Return best result
+            return {
+                "best_params": self._best_params,
+                "best_value": self._best_value,
+                "total_evaluations": self._optimizer.num_tell
+            }
+            
+        except Exception as e:
+            logger.error(f"Error during optimization: {e}")
+            raise
+            
+    async def _evaluate_candidate_wrapper(self, candidate: ng.p.Parameter) -> float:
+        """Wrapper for candidate evaluation that extracts parameters.
         
-        # Set up progress tracking
-        self._setup_progress_tracking()
-    
-    def _setup_logging(self):
-        """Configure logging."""
-        log_file = self.execution_config.get("log_file", "optimization.log")
-        log_level = self.execution_config.get("log_level", "INFO")
+        Args:
+            candidate: The candidate to evaluate
+            
+        Returns:
+            float: The objective function value
+            
+        Raises:
+            Exception: If evaluation fails
+        """
+        try:
+            # Extract parameters from candidate
+            params = candidate.kwargs
+            
+            # Evaluate objective function
+            return await self._evaluate_candidate(params)
+        except Exception as e:
+            logger.error(f"Error evaluating candidate: {e}")
+            raise
+            
+    def stop(self) -> None:
+        """Stop the optimization process."""
+        self._stopped = True
         
-        logging.basicConfig(
-            filename=log_file,
-            level=getattr(logging, log_level),
-            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-            datefmt='%Y-%m-%d %H:%M:%S'
-        )
+    def _create_optimizer(self) -> ng.optimizers.base.Optimizer:
+        """Create and return an optimizer instance.
         
-        self.logger = logging.getLogger(self.__class__.__name__)
-        self.logger.info(f"Initializing {self.__class__.__name__}")
-    
-    def _setup_progress_tracking(self):
-        """Set up progress tracker."""
-        self.progress_tracker = OptimizationProgressTracker(
-            title=f"{self.__class__.__name__} Progress",
-            parameter_config=self.parameter_config,
-            budget=self.optimizer_config.get("budget", float('inf')),
-            display_config=self.execution_config.get("display_config")
-        )
-    
-    @abstractmethod
-    def init_worker(self):
-        """Initialize worker process. Must be implemented by subclasses."""
-        pass
-    
-    @abstractmethod
-    def optimize(self, **kwargs):
-        """Run optimization. Must be implemented by subclasses."""
-        pass
-    
-    def _save_checkpoint(self, state: Dict[str, Any], identifier: str):
-        """Save optimization state to checkpoint."""
-        checkpoint_path = os.path.join(
-            self.execution_config["checkpoint_dir"],
-            f"checkpoint_{identifier}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pkl"
-        )
+        This method should be implemented by subclasses.
+        """
+        raise NotImplementedError
         
-        with open(checkpoint_path, 'wb') as f:
-            pickle.dump(state, f)
+    async def _evaluate_candidate(self, candidate: Dict[str, Any]) -> float:
+        """Evaluate a candidate solution.
         
-        self.logger.info(f"Saved checkpoint to {checkpoint_path}")
-    
-    def _load_checkpoint(self, identifier: str) -> Optional[Dict[str, Any]]:
-        """Load latest checkpoint for given identifier."""
-        checkpoint_dir = self.execution_config["checkpoint_dir"]
-        checkpoints = [
-            f for f in os.listdir(checkpoint_dir)
-            if f.startswith(f"checkpoint_{identifier}_") and f.endswith(".pkl")
-        ]
+        This method should be implemented by subclasses.
         
-        if not checkpoints:
-            return None
-        
-        # Get most recent checkpoint
-        latest_checkpoint = max(checkpoints)
-        checkpoint_path = os.path.join(checkpoint_dir, latest_checkpoint)
-        
-        with open(checkpoint_path, 'rb') as f:
-            state = pickle.load(f)
-        
-        self.logger.info(f"Loaded checkpoint from {checkpoint_path}")
-        return state
-    
-    def _configure_environment(self):
-        """Configure environment variables and settings for worker processes."""
-        # This can be overridden by subclasses to set specific environment variables
-        pass
-    
-    def _precompile_functions(self):
-        """Precompile functions if needed."""
-        # This should be overridden by subclasses that need function precompilation
-        pass 
+        Args:
+            candidate: Dictionary of parameter values to evaluate
+            
+        Returns:
+            float: The objective function value
+            
+        Raises:
+            Exception: If evaluation fails
+        """
+        raise NotImplementedError 

@@ -1,5 +1,5 @@
-"""Task queue management for QuantumOpt."""
-from .task import OptimizationTask
+"""Task queue module for optimization tasks."""
 from .manager import TaskQueue
+from .task import OptimizationTask
 
-__all__ = ['OptimizationTask', 'TaskQueue'] 
+__all__ = ["TaskQueue", "OptimizationTask"] 

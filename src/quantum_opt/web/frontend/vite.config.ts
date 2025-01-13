@@ -1,37 +1,25 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
-import { splitVendorChunkPlugin } from 'vite'
 
 // https://vitejs.dev/config/
 export default defineConfig({
-  plugins: [
-    react(),
-    splitVendorChunkPlugin()
-  ],
+  plugins: [react()],
   build: {
-    target: 'esnext',
-    minify: 'esbuild',
-    sourcemap: false,
+    outDir: 'dist',
+    sourcemap: true,
+    minify: 'terser',
     rollupOptions: {
       output: {
         manualChunks: {
-          'react-vendor': ['react', 'react-dom'],
-          'mui-vendor': ['@mui/material', '@mui/icons-material'],
-          'plotly-vendor': ['plotly.js-dist-min', 'react-plotly.js']
+          'vendor-plotly': ['plotly.js-dist-min', 'react-plotly.js'],
+          'vendor-react': ['react', 'react-dom'],
+          'vendor-mui': ['@mui/material', '@mui/icons-material']
         }
       }
     }
   },
   server: {
-    proxy: {
-      '/api': {
-        target: 'http://localhost:8000',
-        changeOrigin: true,
-      },
-      '/ws': {
-        target: 'ws://localhost:8000',
-        ws: true,
-      },
-    },
+    port: 5173,
+    strictPort: true,
   },
 }) 

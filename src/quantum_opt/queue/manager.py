@@ -1,126 +1,206 @@
-"""Task queue management."""
-from typing import Dict, List, Optional, Any, Callable
-from datetime import datetime
+"""Task queue manager for handling optimization tasks."""
 import asyncio
 import logging
-import traceback
+from typing import Dict, List, Any, Optional, Callable, Awaitable
 from .task import OptimizationTask
-from ..optimizers.global_optimizer import MultiprocessingGlobalOptimizer
+from ..utils.events import EventEmitter, EventType, Event, create_task_event
 
 logger = logging.getLogger(__name__)
 
-class TaskQueue:
-    """Manages optimization tasks."""
+class TaskQueue(EventEmitter):
+    """Manages a queue of optimization tasks."""
+    
     def __init__(self):
-        self.tasks: Dict[str, OptimizationTask] = {}
-        self.queue: List[str] = []  # Order of task IDs
-        self._running: bool = False
-        self._current_task: Optional[str] = None
-        self._event_callbacks: List[Callable] = []
-
-    def add_task(self, task: OptimizationTask) -> str:
-        """Add a task to the queue."""
-        self.tasks[task.task_id] = task
-        self.queue.append(task.task_id)
-        asyncio.create_task(self._notify_event("task_added", task.task_id))
-        return task.task_id
-    
-    def get_next_task(self) -> Optional[OptimizationTask]:
-        """Get the next task to run."""
-        if not self.queue:
-            return None
-        return self.tasks[self.queue[0]]
-    
-    def mark_complete(self, task_id: str, result: Dict[str, Any]):
-        """Mark a task as complete with results."""
-        if task_id not in self.tasks:
-            raise ValueError(f"Task {task_id} not found")
+        """Initialize task queue."""
+        super().__init__()
+        self._tasks: Dict[str, OptimizationTask] = {}
+        self._processing_task: Optional[asyncio.Task] = None
+        self._stopped = True
+        self._is_paused = False
         
-        task = self.tasks[task_id]
-        task.status = 'completed'
-        task.completed_at = datetime.now()
-        task.result = result
-        if task_id in self.queue:
-            self.queue.remove(task_id)
-        asyncio.create_task(self._notify_event("task_completed", task_id))
-    
-    def mark_failed(self, task_id: str, error: str):
-        """Mark a task as failed."""
-        if task_id not in self.tasks:
-            raise ValueError(f"Task {task_id} not found")
+    async def add_task(self, task: OptimizationTask) -> None:
+        """Add a task to the queue.
         
-        task = self.tasks[task_id]
-        task.status = 'failed'
-        task.completed_at = datetime.now()
-        task.result = {"error": error}
-        if task_id in self.queue:
-            self.queue.remove(task_id)
-        asyncio.create_task(self._notify_event("task_failed", task_id))
-
-    def get_task(self, task_id: str) -> Optional[OptimizationTask]:
-        """Get a task by ID."""
-        return self.tasks.get(task_id)
-
-    def get_all_tasks(self) -> List[OptimizationTask]:
-        """Get all tasks."""
-        return list(self.tasks.values())
-
-    def subscribe(self, callback: Callable):
-        """Subscribe to queue events."""
-        self._event_callbacks.append(callback)
-
-    async def _notify_event(self, event_type: str, task_id: str):
-        """Notify subscribers of queue events."""
-        event = {
-            "type": event_type,
-            "task_id": task_id,
-            "task": self.tasks[task_id].to_dict()
-        }
-        for callback in self._event_callbacks:
-            try:
-                if asyncio.iscoroutinefunction(callback):
-                    await callback(event)
-                else:
-                    callback(event)
-            except Exception as e:
-                logger.error(f"Error in event callback: {e}")
-
-    async def start_processing(self):
-        """Start processing tasks in the queue."""
-        self._running = True
-        while self._running and self.queue:
-            task = self.get_next_task()
-            if not task:
-                break
-
-            self._current_task = task.task_id
-            task.status = 'running'
-            task.started_at = datetime.now()
-            await self._notify_event("task_started", task.task_id)
-
-            try:
-                # Create optimizer
-                logger.info(f"Creating optimizer for task {task.task_id}")
-                optimizer = MultiprocessingGlobalOptimizer(
-                    objective_fn=task.objective_function,
-                    parameter_config=task.parameter_config,
-                    optimizer_config=task.optimizer_config,
-                    execution_config=task.execution_config
-                )
+        Args:
+            task: The optimization task to add
+        """
+        if task.task_id in self._tasks:
+            logger.warning(f"Task {task.task_id} already exists in queue")
+            return
+            
+        self._tasks[task.task_id] = task
+        task.add_subscriber(self._forward_task_event)
+        logger.info(f"Added task {task.task_id} to queue")
+        
+        await self.emit(create_task_event(
+            event_type=EventType.TASK_ADDED,
+            task_id=task.task_id,
+            status=task.status
+        ))
+        
+    async def list_tasks(self) -> List[Dict[str, Any]]:
+        """List all tasks in the queue.
+        
+        Returns:
+            List[Dict[str, Any]]: List of task dictionaries
+        """
+        return [task.to_dict() for task in self._tasks.values()]
+        
+    async def get_task(self, task_id: str) -> Optional[OptimizationTask]:
+        """Get a task by ID.
+        
+        Args:
+            task_id: The task ID to look up
+            
+        Returns:
+            Optional[OptimizationTask]: The task if found, None otherwise
+        """
+        return self._tasks.get(task_id)
+        
+    async def remove_task(self, task_id: str) -> bool:
+        """Remove a task from the queue.
+        
+        Args:
+            task_id: The task ID to remove
+            
+        Returns:
+            bool: True if task was removed, False otherwise
+        """
+        if task_id not in self._tasks:
+            logger.warning(f"Task {task_id} not found in queue")
+            return False
+            
+        task = self._tasks[task_id]
+        if task.status == "running":
+            await self.stop_task(task_id)
+            
+        del self._tasks[task_id]
+        logger.info(f"Removed task {task_id} from queue")
+        
+        await self.emit(create_task_event(
+            event_type=EventType.TASK_REMOVED,
+            task_id=task_id,
+            status="removed"
+        ))
+        return True
+        
+    async def start_processing(self) -> None:
+        """Start processing tasks in the queue sequentially."""
+        logger.info("Starting task queue processing")
+        self._stopped = False
+        self._is_paused = False
+        
+        await self.emit(create_task_event(
+            event_type=EventType.QUEUE_STARTED,
+            task_id="queue",
+            status="running"
+        ))
+        
+        while not self._stopped:
+            if self._is_paused:
+                await asyncio.sleep(0.1)
+                continue
                 
-                # Run optimization
-                logger.info(f"Starting optimization for task {task.task_id}")
-                result = await optimizer.optimize()
-                logger.info(f"Optimization complete for task {task.task_id}: {result}")
-                self.mark_complete(task.task_id, result)
+            # Find next pending task
+            pending_tasks = [
+                task for task in self._tasks.values()
+                if task.status == "pending"
+            ]
+            
+            if not pending_tasks:
+                await asyncio.sleep(0.1)
+                continue
                 
+            # Process next task
+            task = pending_tasks[0]
+            try:
+                await task.start_optimization()
             except Exception as e:
-                error_msg = f"Error processing task {task.task_id}: {str(e)}\n{traceback.format_exc()}"
-                logger.error(error_msg)
-                self.mark_failed(task.task_id, error_msg)
-
-            self._current_task = None
-
-    def stop(self):
-        """Stop processing tasks."""
-        self._running = False 
+                logger.error(f"Error processing task {task.task_id}: {e}")
+                
+        await self.emit(create_task_event(
+            event_type=EventType.QUEUE_STOPPED,
+            task_id="queue",
+            status="stopped"
+        ))
+        
+    async def stop_task(self, task_id: str) -> bool:
+        """Stop a specific task.
+        
+        Args:
+            task_id: The task ID to stop
+            
+        Returns:
+            bool: True if task was stopped, False otherwise
+        """
+        if task_id not in self._tasks:
+            logger.warning(f"Task {task_id} not found in queue")
+            return False
+            
+        task = self._tasks[task_id]
+        success = await task.stop()
+        if success:
+            task._optimizer = None  # Ensure optimizer is cleared
+        return success
+        
+    async def pause_task(self, task_id: str) -> bool:
+        """Pause a specific task.
+        
+        Args:
+            task_id: The task ID to pause
+            
+        Returns:
+            bool: True if task was paused, False otherwise
+        """
+        if task_id not in self._tasks:
+            logger.warning(f"Task {task_id} not found in queue")
+            return False
+            
+        task = self._tasks[task_id]
+        return await task.pause()
+        
+    async def resume_task(self, task_id: str) -> bool:
+        """Resume a specific task.
+        
+        Args:
+            task_id: The task ID to resume
+            
+        Returns:
+            bool: True if task was resumed, False otherwise
+        """
+        if task_id not in self._tasks:
+            logger.warning(f"Task {task_id} not found in queue")
+            return False
+            
+        task = self._tasks[task_id]
+        return await task.resume()
+        
+    async def pause_all(self) -> None:
+        """Pause all running tasks."""
+        self._is_paused = True
+        for task in self._tasks.values():
+            if task.status == "running":
+                await task.pause()
+                
+    async def resume_all(self) -> None:
+        """Resume all paused tasks."""
+        self._is_paused = False
+        for task in self._tasks.values():
+            if task.status == "paused":
+                await task.resume()
+                
+    async def stop_all(self) -> None:
+        """Stop all tasks and the queue."""
+        self._stopped = True
+        for task in list(self._tasks.values()):
+            await self.stop_task(task.task_id)
+            
+        await self.emit(create_task_event(
+            event_type=EventType.QUEUE_STOPPED,
+            task_id="queue",
+            status="stopped"
+        ))
+        
+    async def _forward_task_event(self, event: Event) -> None:
+        """Forward events from tasks."""
+        await self.emit(event) 

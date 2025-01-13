@@ -1,58 +1,40 @@
-import { useState, useCallback } from 'react';
+import { useState } from 'react';
 import axios from 'axios';
 
-type OptimizationStatus = 'idle' | 'running' | 'paused' | 'completed' | 'error';
-
 export function useOptimization() {
-  const [status, setStatus] = useState<OptimizationStatus>('idle');
-  const [progress, setProgress] = useState(0);
   const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
 
-  const startOptimization = useCallback(async (config: any) => {
+  const startOptimization = async (taskId: string) => {
+    setLoading(true);
+    setError(null);
+    
     try {
-      const response = await axios.post('/api/optimization', config);
-      setStatus('running');
-      return response.data;
+      await axios.post(`http://localhost:8000/api/queue/task/${taskId}/start`);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to start optimization');
-      setStatus('error');
+    } finally {
+      setLoading(false);
     }
-  }, []);
+  };
 
-  const pauseOptimization = useCallback(async () => {
+  const cancelOptimization = async (taskId: string) => {
+    setLoading(true);
+    setError(null);
+    
     try {
-      await axios.post('/api/optimization/pause');
-      setStatus('paused');
+      await axios.post(`http://localhost:8000/api/queue/task/${taskId}/cancel`);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to pause optimization');
+      setError(err instanceof Error ? err.message : 'Failed to cancel optimization');
+    } finally {
+      setLoading(false);
     }
-  }, []);
-
-  const resumeOptimization = useCallback(async () => {
-    try {
-      await axios.post('/api/optimization/resume');
-      setStatus('running');
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to resume optimization');
-    }
-  }, []);
-
-  const stopOptimization = useCallback(async () => {
-    try {
-      await axios.post('/api/optimization/stop');
-      setStatus('idle');
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to stop optimization');
-    }
-  }, []);
+  };
 
   return {
-    status,
-    progress,
     error,
+    loading,
     startOptimization,
-    pauseOptimization,
-    resumeOptimization,
-    stopOptimization,
+    cancelOptimization,
   };
 } 

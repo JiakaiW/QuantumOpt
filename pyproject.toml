@@ -17,19 +17,22 @@ dependencies = [
     "nevergrad>=0.8.0",
     "qutip>=4.7.0",
     "matplotlib>=3.5.0",
-    "fastapi>=0.100.0",
+    "fastapi>=0.100.0,<0.116.0",
     "uvicorn>=0.24.0",
     "websockets>=11.0.0",
-    "pydantic>=2.0.0",
-    "python-multipart>=0.0.6"
+    "pydantic>=2.0.0,<3.0.0",
+    "python-multipart>=0.0.6",
+    "starlette>=0.27.0",
+    "aiohttp>=3.8.0",
+    "rich>=10.0.0"
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=7.0.0",
+    "pytest>=8.0.0",
     "black>=22.0.0",
     "isort>=5.0.0",
     "mypy>=1.0.0",
-    "pytest-asyncio>=0.21.0",
+    "pytest-asyncio>=0.25.0",
     "httpx>=0.24.0"
 ] 

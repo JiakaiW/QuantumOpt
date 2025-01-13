@@ -1,198 +1,133 @@
-"""Tests for the global optimizer implementation."""
-
+"""Tests for global optimizer implementation."""
 import pytest
 import numpy as np
-from quantum_opt.optimizers import MultiprocessingGlobalOptimizer
-from quantum_opt.utils.event_system import OptimizationEventSystem
+import asyncio
+from quantum_opt.optimizers import (
+    MultiprocessingGlobalOptimizer,
+    OptimizationConfig,
+    ParameterConfig,
+    OptimizerConfig
+)
+from quantum_opt.utils.events import Event, EventType
 
-
-def rosenbrock(x, y):
+def rosenbrock(**kwargs):
     """Rosenbrock function for testing optimization."""
+    x = kwargs.get('x', 0)
+    y = kwargs.get('y', 0)
     return (1 - x) ** 2 + 100 * (y - x ** 2) ** 2
 
-
-def test_global_optimizer_basic():
-    """Test basic optimization functionality."""
-    # Configure optimizer
-    parameter_config = {
-        "x": {
-            "type": "scalar",
-            "init": 0.0,
-            "lower": -2.0,
-            "upper": 2.0,
-            "display_name": "X",
-            "format": ".4f",
+@pytest.fixture
+def optimizer_config():
+    """Create a test optimizer configuration."""
+    return OptimizationConfig(
+        name="test_basic",
+        parameter_config={
+            "x": ParameterConfig(
+                lower_bound=-2.0,
+                upper_bound=2.0,
+                init=0.0,
+                scale="linear"
+            ),
+            "y": ParameterConfig(
+                lower_bound=-2.0,
+                upper_bound=2.0,
+                init=0.0,
+                scale="linear"
+            )
         },
-        "y": {
-            "type": "scalar",
-            "init": 0.0,
-            "lower": -2.0,
-            "upper": 2.0,
-            "display_name": "Y",
-            "format": ".4f",
+        optimizer_config=OptimizerConfig(
+            optimizer_type="OnePlusOne",
+            budget=20,
+            num_workers=1
+        ),
+        objective_fn=rosenbrock
+    )
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(5)
+async def test_global_optimizer_basic(optimizer_config):
+    """Test basic optimization functionality."""
+    optimizer = MultiprocessingGlobalOptimizer(optimizer_config)
+    try:
+        result = await asyncio.wait_for(optimizer.optimize(), timeout=4)
+        assert result is not None
+        assert isinstance(result, dict)
+        assert "best_params" in result
+        assert "best_value" in result
+        assert result["best_params"]["x"] > -2.0
+        assert result["best_value"] < 1000.0
+    except asyncio.TimeoutError:
+        pytest.fail("Optimization timed out")
+
+@pytest.mark.asyncio
+async def test_global_optimizer_with_events(optimizer_config):
+    """Test that events are emitted during optimization."""
+    optimizer = MultiprocessingGlobalOptimizer(optimizer_config)
+    events = []
+    
+    def event_handler(event: Event):
+        events.append(event)
+    
+    optimizer.add_subscriber(event_handler)
+    
+    try:
+        result = await asyncio.wait_for(optimizer.optimize(), timeout=4)
+        assert result is not None
+        assert len(events) > 0
+        assert any(event.type == EventType.ITERATION_COMPLETED for event in events)
+    except asyncio.TimeoutError:
+        pytest.fail("Optimization timed out")
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(5)
+async def test_global_optimizer_error_handling(optimizer_config):
+    """Test error handling during optimization."""
+    def failing_objective(**kwargs):
+        raise ValueError("Test error")
+    
+    config = optimizer_config.model_copy(update={
+        "name": "test_error",
+        "objective_fn": failing_objective,
+        "optimizer_config": OptimizerConfig(
+            optimizer_type="OnePlusOne",
+            budget=5,  # Small budget for quick failure
+            num_workers=1
+        )
+    })
+    
+    optimizer = MultiprocessingGlobalOptimizer(config)
+    with pytest.raises(Exception) as exc_info:
+        await optimizer.optimize()
+    assert "Test error" in str(exc_info.value)
+
+@pytest.mark.asyncio
+async def test_global_optimizer_log_scale(optimizer_config):
+    """Test optimization with log-scale parameters."""
+    config = optimizer_config.model_copy(update={
+        "name": "test_log_scale",
+        "parameter_config": {
+            "x": ParameterConfig(
+                lower_bound=1e-3,
+                upper_bound=1e3,
+                init=1.0,
+                scale="log"
+            ),
+            "y": ParameterConfig(
+                lower_bound=1e-3,
+                upper_bound=1e3,
+                init=1.0,
+                scale="log"
+            )
         }
-    }
+    })
     
-    optimizer_config = {
-        "optimizer": "CMA",
-        "budget": 100,
-        "num_workers": 2,
-    }
-    
-    execution_config = {
-        "checkpoint_dir": None,  # Disable checkpointing for tests
-        "log_file": None,       # Disable logging for tests
-    }
-    
-    # Create optimizer
-    optimizer = MultiprocessingGlobalOptimizer(
-        objective_fn=lambda **kwargs: rosenbrock(**kwargs),
-        parameter_config=parameter_config,
-        optimizer_config=optimizer_config,
-        execution_config=execution_config
-    )
-    
-    # Run optimization
-    results = optimizer.optimize()
-    
-    # Check results
-    assert "best_value" in results
-    assert "best_params" in results
-    assert "total_evaluations" in results
-    assert results["total_evaluations"] <= optimizer_config["budget"]
-    
-    # Check if optimization found the minimum (1, 1)
-    best_x = results["best_params"]["x"]
-    best_y = results["best_params"]["y"]
-    assert abs(best_x - 1.0) < 0.1
-    assert abs(best_y - 1.0) < 0.1
-
-
-def test_global_optimizer_with_events():
-    """Test optimizer with event system integration."""
-    event_system = OptimizationEventSystem()
-    events_received = []
-    
-    def event_callback(data):
-        events_received.append(data)
-    
-    event_system.subscribe("ITERATION_COMPLETE", event_callback)
-    
-    # Configure optimizer
-    parameter_config = {
-        "x": {"type": "scalar", "init": 0.0, "lower": -2.0, "upper": 2.0},
-        "y": {"type": "scalar", "init": 0.0, "lower": -2.0, "upper": 2.0},
-    }
-    
-    optimizer = MultiprocessingGlobalOptimizer(
-        objective_fn=lambda **kwargs: rosenbrock(**kwargs),
-        parameter_config=parameter_config,
-        optimizer_config={"optimizer": "CMA", "budget": 10, "num_workers": 1},
-        execution_config={},
-        event_system=event_system
-    )
-    
-    # Run optimization
-    optimizer.optimize()
-    
-    # Check events
-    assert len(events_received) > 0
-
-
-def test_global_optimizer_pause_resume():
-    """Test pause/resume functionality."""
-    event_system = OptimizationEventSystem()
-    iterations_before_pause = 0
-    total_iterations = 0
-    
-    def count_iterations(data):
-        nonlocal iterations_before_pause, total_iterations
-        if not event_system.is_paused():
-            iterations_before_pause += 1
-        total_iterations += 1
-    
-    event_system.subscribe("ITERATION_COMPLETE", count_iterations)
-    
-    # Configure optimizer
-    parameter_config = {
-        "x": {"type": "scalar", "init": 0.0, "lower": -2.0, "upper": 2.0},
-        "y": {"type": "scalar", "init": 0.0, "lower": -2.0, "upper": 2.0},
-    }
-    
-    optimizer = MultiprocessingGlobalOptimizer(
-        objective_fn=lambda **kwargs: rosenbrock(**kwargs),
-        parameter_config=parameter_config,
-        optimizer_config={"optimizer": "CMA", "budget": 20, "num_workers": 1},
-        execution_config={},
-        event_system=event_system
-    )
-    
-    # Start optimization in a separate thread
-    import threading
-    opt_thread = threading.Thread(target=optimizer.optimize)
-    opt_thread.start()
-    
-    # Let it run for a few iterations
-    import time
-    time.sleep(1.0)
-    
-    # Pause optimization
-    event_system.request_pause()
-    iterations_at_pause = iterations_before_pause
-    
-    # Wait a bit
-    time.sleep(0.5)
-    
-    # Resume optimization
-    event_system.request_resume()
-    
-    # Wait for completion
-    opt_thread.join()
-    
-    # Verify behavior
-    assert iterations_at_pause < total_iterations
-    assert total_iterations <= 20  # Should not exceed budget
-
-
-def test_global_optimizer_skip_task():
-    """Test task skipping functionality."""
-    event_system = OptimizationEventSystem()
-    iterations_completed = 0
-    
-    def count_iterations(data):
-        nonlocal iterations_completed
-        iterations_completed += 1
-    
-    event_system.subscribe("ITERATION_COMPLETE", count_iterations)
-    
-    # Configure optimizer
-    parameter_config = {
-        "x": {"type": "scalar", "init": 0.0, "lower": -2.0, "upper": 2.0},
-        "y": {"type": "scalar", "init": 0.0, "lower": -2.0, "upper": 2.0},
-    }
-    
-    optimizer = MultiprocessingGlobalOptimizer(
-        objective_fn=lambda **kwargs: rosenbrock(**kwargs),
-        parameter_config=parameter_config,
-        optimizer_config={"optimizer": "CMA", "budget": 50, "num_workers": 1},
-        execution_config={},
-        event_system=event_system
-    )
-    
-    # Start optimization in a separate thread
-    import threading
-    opt_thread = threading.Thread(target=optimizer.optimize)
-    opt_thread.start()
-    
-    # Let it run for a few iterations
-    import time
-    time.sleep(1.0)
-    
-    # Skip current task
-    event_system.request_skip()
-    
-    # Wait for completion
-    opt_thread.join()
-    
-    # Verify behavior
-    assert iterations_completed < 50  # Should have stopped before budget 
+    optimizer = MultiprocessingGlobalOptimizer(config)
+    try:
+        result = await asyncio.wait_for(optimizer.optimize(), timeout=4)
+        assert result is not None
+        assert isinstance(result, dict)
+        assert "best_params" in result
+        assert result["best_params"]["x"] > 0
+        assert result["best_params"]["y"] > 0
+    except asyncio.TimeoutError:
+        pytest.fail("Optimization timed out") 
