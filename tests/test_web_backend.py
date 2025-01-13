@@ -13,43 +13,61 @@ from quantum_opt.optimizers.optimization_schemas import OptimizationConfig, Para
 @pytest.fixture
 def test_config():
     """Create a test optimization configuration."""
-    return OptimizationConfig(
-        name="test_task",
-        parameter_config={
-            "x": ParameterConfig(
-                lower_bound=-1.0,
-                upper_bound=1.0,
-                init=0.0,
-                scale="linear"
-            )
+    return {
+        "name": "test_task",
+        "parameter_config": {
+            "x": {
+                "lower_bound": -1.0,
+                "upper_bound": 1.0,
+                "init": 0.0,
+                "scale": "linear"
+            }
         },
-        optimizer_config=OptimizerConfig(
-            optimizer_type="OnePlusOne",
-            budget=100,
-            num_workers=1
-        ),
-        objective_fn=lambda x: x**2
-    )
+        "optimizer_config": {
+            "optimizer_type": "OnePlusOne",
+            "budget": 100,
+            "num_workers": 1
+        },
+        "execution_config": {
+            "max_retries": 3,
+            "timeout": 3600.0
+        },
+        "objective_fn": "def objective(x): return x**2"
+    }
 
 @pytest.fixture
 def mock_task_queue():
     """Create a mock task queue."""
     queue = AsyncMock(spec=TaskQueue)
     queue.add_task = AsyncMock(return_value=None)
-    queue.get_task = AsyncMock(return_value={
+    
+    # Create a proper task state
+    task_state = {
         "task_id": "test-task",
         "status": "pending",
-        "config": {},
+        "config": {
+            "name": "test_task",
+            "parameter_config": {
+                "x": {
+                    "lower_bound": -1.0,
+                    "upper_bound": 1.0,
+                    "init": 0.0,
+                    "scale": "linear"
+                }
+            },
+            "optimizer_config": {
+                "optimizer_type": "OnePlusOne",
+                "budget": 100,
+                "num_workers": 1
+            },
+            "objective_fn": "def objective(x): return x**2"
+        },
         "result": None,
         "error": None
-    })
-    queue.list_tasks = AsyncMock(return_value=[{
-        "task_id": "test-task",
-        "status": "pending",
-        "config": {},
-        "result": None,
-        "error": None
-    }])
+    }
+    
+    queue.get_task = AsyncMock(return_value=task_state)
+    queue.list_tasks = AsyncMock(return_value=[task_state])
     return queue
 
 @pytest.fixture
@@ -74,7 +92,8 @@ def client(test_app):
 
 def test_create_task(client, test_config, mock_task_queue):
     """Test task creation endpoint."""
-    response = client.post("/tasks", json=test_config.model_dump())
+    response = client.post("/tasks", json=test_config)
+    print(f"Response: {response.json()}")  # Print response for debugging
     assert response.status_code == 200
     data = response.json()
     assert data["status"] == "success"
@@ -118,7 +137,23 @@ def test_task_control_failure(client, mock_task_queue):
     mock_task_queue.get_task.return_value = {
         "task_id": "test-task",
         "status": "running",
-        "config": {},
+        "config": {
+            "name": "test_task",
+            "parameter_config": {
+                "x": {
+                    "lower_bound": -1.0,
+                    "upper_bound": 1.0,
+                    "init": 0.0,
+                    "scale": "linear"
+                }
+            },
+            "optimizer_config": {
+                "optimizer_type": "OnePlusOne",
+                "budget": 100,
+                "num_workers": 1
+            },
+            "objective_fn": "def objective(x): return x**2"
+        },
         "result": None,
         "error": None
     }
@@ -129,11 +164,13 @@ def test_task_control_failure(client, mock_task_queue):
     assert data["status"] == "error"
     assert "message" in data["error"]
 
-@pytest.mark.asyncio
-async def test_websocket_endpoint(test_app, mock_websocket_manager):
+def test_websocket_endpoint(test_app, mock_websocket_manager):
     """Test WebSocket endpoint."""
-    async with TestClient(test_app) as client:
-        async with client.websocket_connect("/ws") as websocket:
-            data = {"message": "test"}
-            await websocket.send_json(data)
-            mock_websocket_manager.broadcast.assert_called_once_with(data) 
+    with TestClient(test_app) as client:
+        with client.websocket_connect("/ws") as websocket:
+            # Send a test message
+            message = {"type": "test", "data": {"message": "test"}}
+            websocket.send_json(message)
+            
+            # Verify the message was broadcast
+            mock_websocket_manager.broadcast.assert_called_once_with(message) 

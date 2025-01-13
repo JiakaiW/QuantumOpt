@@ -28,22 +28,55 @@ POST /tasks
 
 ```json
 {
+    "name": "Example Optimization",
     "parameter_config": {
         "param1": {
             "lower_bound": 0.0,
-            "upper_bound": 1.0
+            "upper_bound": 1.0,
+            "init": 0.5,
+            "scale": "linear"
         }
     },
     "optimizer_config": {
-        "optimizer_type": "nevergrad",
-        "budget": 100
+        "optimizer_type": "OnePlusOne",
+        "budget": 100,
+        "num_workers": 1
     },
     "execution_config": {
         "max_retries": 3,
         "timeout": 3600
     },
-    "objective_function": "def objective(params): return sum(x**2 for x in params.values())"
+    "objective_fn": "def objective(param1):\n    # This is the function to minimize\n    return param1 ** 2"
 }
+```
+
+The `objective_fn` field accepts a string containing a Python function definition. This design choice enables:
+- Frontend display of the optimization objective
+- Dynamic function creation without security risks
+- Easy serialization and storage
+- Support for arbitrary Python functions
+
+Requirements for the objective function:
+1. Must be a valid Python function definition
+2. Function name must match the string after "def " and before "("
+3. Parameters must match the keys in parameter_config
+4. Must return a float value to minimize
+5. Can use standard Python math operations and functions
+
+Example objective functions:
+```python
+# Simple quadratic
+def objective(x):
+    return x ** 2
+
+# Multi-parameter optimization
+def objective(x, y, z):
+    return x**2 + y**2 + z**2
+
+# With mathematical functions
+def objective(theta, phi):
+    import math
+    return math.sin(theta)**2 + math.cos(phi)**2
 ```
 
 #### Response

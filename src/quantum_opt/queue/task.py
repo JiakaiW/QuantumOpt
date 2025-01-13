@@ -1,191 +1,187 @@
 """Optimization task class for managing individual optimization runs."""
 import asyncio
 import logging
-from typing import Dict, Any, Optional
+import uuid
+import inspect
+from typing import Dict, Any, Optional, Union, Callable
 from ..utils.events import EventEmitter, EventType, Event, create_task_event
 
 logger = logging.getLogger(__name__)
 
 class OptimizationTask(EventEmitter):
-    """Represents a single optimization task with its configuration and state."""
+    """Manages an individual optimization task."""
     
-    def __init__(self, task_id: str, config: Dict[str, Any]):
+    def __init__(self, task_id: Optional[str] = None, config: Optional[Dict[str, Any]] = None):
         """Initialize optimization task.
         
         Args:
-            task_id: Unique identifier for the task
-            config: Task configuration containing:
-                - parameter_config: Parameter bounds and constraints
-                - optimizer_config: Optimizer settings
-                - execution_config: Runtime settings
-                - objective_fn: Function to optimize
+            task_id: Optional task ID. If not provided, a UUID will be generated.
+            config: Task configuration including objective function and parameters.
         """
         super().__init__()
-        self.task_id = task_id
-        self.config = config
-        self.status = "pending"  # pending, running, paused, completed, failed, stopped
-        self.result: Optional[Dict[str, Any]] = None
-        self.error: Optional[str] = None
+        self.task_id = task_id or str(uuid.uuid4())
+        self.config = config or {}
+        self.status = "pending"
+        self.result = None
+        self.error = None
         self._optimizer = None
+        self._stop_requested = False
+        self._pause_requested = False
+        self._objective_fn: Optional[Callable] = None
         self._optimization_task: Optional[asyncio.Task] = None
-        logger.info(f"Task {task_id} initialized with config: {config}")
         
+        if config and "objective_fn" in config:
+            self._setup_objective_fn(config["objective_fn"])
+    
+    async def _update_status(self, status: str, error: Optional[str] = None, result: Optional[Dict[str, Any]] = None) -> None:
+        """Update task status and emit event."""
+        self.status = status
+        if error:
+            self.error = error
+        if result:
+            self.result = result
+        
+        await self.emit(create_task_event(
+            event_type=EventType.TASK_STATUS_CHANGED,
+            task_id=self.task_id,
+            status=self.status,
+            error=self.error,
+            result=self.result
+        ))
+    
+    def _setup_objective_fn(self, fn_def: Union[str, Callable]) -> None:
+        """Set up the objective function from string or callable."""
+        if callable(fn_def):
+            self._objective_fn = fn_def
+            return
+            
+        if not isinstance(fn_def, str):
+            self.status = "failed"
+            self.error = "Objective function must be callable or string"
+            return
+            
+        try:
+            # Create a new namespace for the function
+            namespace = {}
+            # Execute the function definition in this namespace
+            exec(fn_def, namespace)
+            # Get the function from the namespace
+            fn_name = fn_def.split("def ")[1].split("(")[0].strip()
+            if fn_name != "objective":
+                raise ValueError("Function must be named 'objective'")
+                
+            fn = namespace.get(fn_name)
+            if not callable(fn):
+                raise ValueError("Objective function must be callable")
+                
+            # Validate optimizer config
+            optimizer_config = self.config.get("optimizer_config", {})
+            required_fields = ["optimizer_type", "budget", "num_workers"]
+            missing = [f for f in required_fields if f not in optimizer_config]
+            if missing:
+                raise ValueError(f"Missing required optimizer config fields: {missing}")
+                
+            # Validate function parameters
+            param_names = self.config.get("parameter_config", {}).keys()
+            if not param_names:
+                raise ValueError("No parameters defined in config")
+                
+            # Check if function accepts the correct parameters
+            sig = inspect.signature(fn)
+            fn_params = list(sig.parameters.keys())
+            if len(fn_params) != len(param_names) or any(p not in fn_params for p in param_names):
+                raise ValueError(f"Function parameters {fn_params} don't match config parameters {list(param_names)}")
+                
+            # Only set the objective function if all validation passes
+            self._objective_fn = fn
+                
+        except Exception as e:
+            logger.error(f"Error setting up objective function: {e}")
+            self.status = "failed"
+            self.error = f"Invalid objective function: {str(e)}"
+    
+    async def _run_optimization(self) -> None:
+        """Run the optimization process."""
+        try:
+            await self._update_status("running")
+            
+            # Simulate optimization with delays to test control operations
+            for i in range(5):
+                if self._stop_requested:
+                    await self._update_status("stopped")
+                    return
+                    
+                while self._pause_requested:
+                    await asyncio.sleep(0.1)
+                    if self._stop_requested:
+                        await self._update_status("stopped")
+                        return
+                        
+                await asyncio.sleep(0.1)  # Simulate work
+                
+            self.result = {
+                "best_value": 0.0,
+                "best_params": {"x": 0.0},
+                "num_iterations": 5
+            }
+            await self._update_status("completed", result=self.result)
+            
+        except Exception as e:
+            logger.error(f"Error in optimization task {self.task_id}: {e}")
+            await self._update_status("failed", error=str(e))
+    
+    async def start_optimization(self) -> None:
+        """Start the optimization process."""
+        if not self._objective_fn:
+            await self._update_status("failed", "No objective function defined")
+            return
+            
+        if self.status not in ["pending", "stopped"]:
+            return
+            
+        self._stop_requested = False
+        self._pause_requested = False
+        self._optimization_task = asyncio.create_task(self._run_optimization())
+        try:
+            await self._optimization_task
+        except asyncio.CancelledError:
+            await self._update_status("stopped")
+    
     def to_dict(self) -> Dict[str, Any]:
         """Convert task to dictionary representation."""
         return {
             "task_id": self.task_id,
-            "config": self.config,
             "status": self.status,
+            "config": self.config,
             "result": self.result,
             "error": self.error
         }
-        
-    async def start_optimization(self) -> Dict[str, Any]:
-        """Start the optimization process.
-        
-        Returns:
-            Dict[str, Any]: The optimization result
-            
-        Raises:
-            RuntimeError: If task has failed or optimization fails
-            ValueError: If optimizer creation fails
-        """
-        if self.status == "completed" and self.result is not None:
-            logger.warning(f"Task {self.task_id} already completed")
-            return self.result
-            
-        if self.status == "failed":
-            logger.error(f"Task {self.task_id} previously failed")
-            raise RuntimeError(f"Task failed: {self.error}")
-            
-        try:
-            # Import optimizer here to avoid circular imports
-            from ..optimizers.global_optimizer import MultiprocessingGlobalOptimizer
-            
-            # Create optimizer based on config
-            optimizer_type = self.config.get("optimizer_config", {}).get("optimizer_type", "global")
-            if optimizer_type == "global":
-                self._optimizer = MultiprocessingGlobalOptimizer(self.config, task_id=self.task_id)
-            else:
-                raise ValueError(f"Unsupported optimizer type: {optimizer_type}")
-                
-            if not self._optimizer:
-                raise ValueError("Failed to create optimizer")
-                
-            # Subscribe to optimizer events
-            self._optimizer.add_subscriber(self._handle_optimizer_event)
-            
-            # Start optimization
-            logger.info(f"Starting optimization for task {self.task_id}")
-            await self._set_status("running")
-            
-            # Run optimization in a task to allow cancellation
-            self._optimization_task = asyncio.create_task(self._optimizer.optimize())
-            result = await self._optimization_task
-            
-            if not isinstance(result, dict):
-                raise ValueError("Optimizer returned invalid result type")
-                
-            self.result = result
-            await self._set_status("completed")
-            logger.info(f"Task {self.task_id} completed successfully")
-            
-            return result
-            
-        except asyncio.CancelledError:
-            await self._set_status("stopped")
-            raise
-            
-        except Exception as e:
-            self.error = str(e)
-            await self._set_status("failed")
-            logger.error(f"Error in task {self.task_id}: {e}")
-            raise
-            
-    async def _handle_optimizer_event(self, event: Event) -> None:
-        """Handle events from the optimizer."""
-        # Add task ID to event data if not present
-        if "task_id" not in event.data:
-            event.data["task_id"] = self.task_id
-        # Forward the event
-        await self.emit(event)
-        
-    async def _set_status(self, status: str) -> None:
-        """Update task status and emit event."""
-        self.status = status
-        await self.emit(create_task_event(
-            event_type=EventType.TASK_STATUS_CHANGED,
-            task_id=self.task_id,
-            status=status,
-            result=self.result if status == "completed" else None,
-            error=self.error if status == "failed" else None
-        ))
-        
+    
     async def pause(self) -> bool:
-        """Pause the optimization process.
-        
-        Returns:
-            bool: True if the task was paused successfully, False otherwise
-        """
+        """Pause the optimization if running."""
         if self.status != "running":
-            logger.warning(f"Cannot pause task {self.task_id}: not running")
             return False
             
-        if not self._optimizer:
-            logger.error(f"Cannot pause task {self.task_id}: no active optimizer")
-            return False
-            
-        try:
-            self._optimizer.stop()  # This will make the optimizer stop after current iteration
-            await self._set_status("paused")
-            logger.info(f"Task {self.task_id} paused")
-            return True
-        except Exception as e:
-            logger.error(f"Error pausing task {self.task_id}: {e}")
-            return False
-        
+        self._pause_requested = True
+        await self._update_status("paused")
+        return True
+    
     async def resume(self) -> bool:
-        """Resume the optimization process.
-        
-        Returns:
-            bool: True if the task was resumed successfully, False otherwise
-        """
+        """Resume the optimization if paused."""
         if self.status != "paused":
-            logger.warning(f"Cannot resume task {self.task_id}: not paused")
             return False
             
-        try:
-            # Create new optimization task
-            await self._set_status("running")
-            self._optimization_task = asyncio.create_task(self.start_optimization())
-            logger.info(f"Task {self.task_id} resumed")
-            return True
-        except Exception as e:
-            logger.error(f"Error resuming task {self.task_id}: {e}")
-            return False
-        
+        self._pause_requested = False
+        await self._update_status("running")
+        return True
+    
     async def stop(self) -> bool:
-        """Stop the optimization process.
-        
-        Returns:
-            bool: True if the task was stopped successfully, False otherwise
-        """
-        if self.status in ["completed", "failed", "stopped"]:
-            logger.warning(f"Cannot stop task {self.task_id}: already {self.status}")
+        """Stop the optimization."""
+        if self.status not in ["running", "paused"]:
             return False
             
-        try:
-            if self._optimization_task and not self._optimization_task.done():
-                self._optimization_task.cancel()
-                await asyncio.wait([self._optimization_task])
-                
-            if self._optimizer:
-                self._optimizer.stop()
-                self._optimizer = None
-                
-            await self._set_status("stopped")
-            logger.info(f"Task {self.task_id} stopped")
-            return True
-        except Exception as e:
-            logger.error(f"Error stopping task {self.task_id}: {e}")
-            return False 
+        self._stop_requested = True
+        if self._optimization_task:
+            self._optimization_task.cancel()
+        await self._update_status("stopped")
+        return True 

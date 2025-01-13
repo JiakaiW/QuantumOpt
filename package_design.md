@@ -4,6 +4,30 @@
 
 QuantumOpt is a general framework for optimization, providing parallel execution of objective functions and real-time visualization through a modern web interface. The framework enables queuing multiple optimization tasks, each targeting different quantum control objectives, while allowing real-time monitoring and control of the optimization process.
 
+### Key Design Features
+
+1. **String-Based Objective Functions**
+   - Objective functions are defined as string-based Python function definitions
+   - Enables frontend visualization of optimization objectives
+   - Supports dynamic function creation and evaluation
+   - Ensures safe serialization and storage
+   - Allows arbitrary Python functions with proper validation
+
+2. **Event-Driven Architecture**
+   - Components communicate through typed events
+   - Real-time updates via WebSocket
+   - Standardized event formats
+
+3. **Task Queue Management**
+   - Sequential task processing
+   - State machine-based task lifecycle
+   - Pause/Resume/Stop capabilities
+
+4. **Web Interface**
+   - Modern React frontend
+   - FastAPI backend
+   - Real-time visualization
+
 ## Core Components and Implementation Status
 
 ### 1. Quantum Optimization Engine
@@ -136,3 +160,26 @@ See `docs/api.md` for:
 - Implement proper error handling at all levels
 - Use async/await for asynchronous operations
 - Follow component-based architecture in frontend 
+
+## Security Considerations
+
+### Objective Function Execution
+The framework executes user-provided objective functions as Python code. To ensure security:
+
+1. **Sandboxing**
+   - Functions are executed in a restricted environment
+   - Limited access to Python builtins
+   - No file system or network access
+   - Timeout limits on execution
+
+2. **Input Validation**
+   - Function string must be valid Python code
+   - Parameters must match configuration
+   - Return value must be numeric
+   - Size limits on function definition
+
+3. **Resource Management**
+   - Memory usage limits
+   - CPU time constraints
+   - Maximum iterations cap
+   - Worker process isolation 

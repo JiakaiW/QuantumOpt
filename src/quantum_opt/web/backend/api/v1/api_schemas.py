@@ -47,7 +47,13 @@ class OptimizationConfig(BaseModel):
     parameter_config: Dict[str, ParameterConfig] = Field(..., description="Parameter configurations")
     optimizer_config: OptimizerConfig = Field(..., description="Optimizer configuration")
     execution_config: ExecutionConfig = Field(default_factory=ExecutionConfig, description="Execution configuration")
-    objective_fn: Callable[..., float] = Field(..., description="Objective function to optimize")
+    objective_fn: str = Field(
+        ..., 
+        description="String representation of the objective function to optimize. "
+        "Must be a valid Python function definition that takes parameters matching "
+        "the parameter_config keys and returns a float value. "
+        "Example: 'def objective(x, y): return x**2 + y**2'"
+    )
 
 class TaskResponse(BaseModel):
     """Response model for task creation."""
