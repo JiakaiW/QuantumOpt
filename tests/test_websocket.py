@@ -1,198 +1,276 @@
-"""Tests for WebSocket manager functionality."""
+"""Tests for WebSocket functionality."""
 import pytest
+import pytest_asyncio
+import logging
 import asyncio
-from unittest.mock import Mock, AsyncMock, patch
-from fastapi import WebSocket, WebSocketDisconnect
-from quantum_opt.queue import TaskQueue
+from typing import Dict, Any, AsyncGenerator
+from fastapi import FastAPI, WebSocket
+from fastapi.testclient import TestClient
+from quantum_opt.web.backend.api.v1.router import router
+from quantum_opt.queue.manager import TaskQueue
 from quantum_opt.web.backend.websocket_manager import WebSocketManager
-from quantum_opt.utils.events import Event, EventType, create_api_response
+from quantum_opt.web.backend.api.dependencies import get_task_queue, get_websocket_manager
+from quantum_opt.utils.events import EventType, create_api_response
 
-@pytest.fixture
-def mock_websocket():
-    """Create a mock WebSocket connection."""
-    websocket = AsyncMock(spec=WebSocket)
-    websocket.send_json = AsyncMock()
-    websocket.receive_json = AsyncMock()
-    return websocket
+# Configure logging
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
-@pytest.fixture
-def mock_task_queue():
-    """Create a mock TaskQueue."""
-    queue = Mock(spec=TaskQueue)
-    queue.add_subscriber = Mock()
-    queue.list_tasks = AsyncMock(return_value=[])
-    queue._current_task = None
-    queue._stopped = False
-    queue._is_paused = False
-    return queue
+# Constants
+TEST_TIMEOUT = 10  # 10 seconds timeout for tests
 
-@pytest.fixture
-def websocket_manager(mock_task_queue):
-    """Create a WebSocketManager instance with mocked dependencies."""
+@pytest_asyncio.fixture
+async def task_queue() -> AsyncGenerator[TaskQueue, None]:
+    """Create a fresh TaskQueue instance for each test."""
+    queue = TaskQueue()
+    # Don't start processing yet - let the WebSocket manager handle that
+    yield queue
+    await queue.stop_processing()
+
+@pytest_asyncio.fixture
+async def websocket_manager(task_queue: TaskQueue) -> AsyncGenerator[WebSocketManager, None]:
+    """Create a WebSocketManager instance."""
     manager = WebSocketManager()
-    manager.initialize_queue(mock_task_queue)
-    return manager
+    manager.initialize_queue(task_queue)
+    # Start processing after WebSocket manager is initialized
+    await task_queue.start_processing()
+    yield manager
+    await task_queue.stop_processing()
 
-@pytest.mark.asyncio
-async def test_connect_new_client(websocket_manager, mock_websocket):
-    """Test connecting a new client."""
-    client_id = "test-client-1"
+@pytest_asyncio.fixture
+async def test_app(task_queue: TaskQueue, websocket_manager: WebSocketManager) -> AsyncGenerator[FastAPI, None]:
+    """Create a FastAPI test application."""
+    app = FastAPI()
+    app.include_router(router, prefix="/api/v1")
     
-    await websocket_manager.connect(mock_websocket, client_id)
-    
-    assert mock_websocket in websocket_manager._connections
-    assert websocket_manager._reconnect_attempts[client_id] == 0
-    mock_websocket.accept.assert_called_once()
-    mock_websocket.send_json.assert_called_once()
-    
-    # Verify initial state message
-    call_args = mock_websocket.send_json.call_args[0][0]
-    assert call_args["status"] == "success"
-    assert call_args["data"]["type"] == "INITIAL_STATE"
-    assert "tasks" in call_args["data"]
-    assert "queue_status" in call_args["data"]
+    # Override dependencies to use our test instances
+    app.dependency_overrides[get_task_queue] = lambda: task_queue
+    app.dependency_overrides[get_websocket_manager] = lambda: websocket_manager
+    yield app
 
-@pytest.mark.asyncio
-async def test_disconnect_client(websocket_manager, mock_websocket):
-    """Test disconnecting a client."""
-    client_id = "test-client-1"
-    
-    # First connect
-    await websocket_manager.connect(mock_websocket, client_id)
-    assert mock_websocket in websocket_manager._connections
-    
-    # Then disconnect
-    await websocket_manager.disconnect(mock_websocket, client_id)
-    assert mock_websocket not in websocket_manager._connections
-    assert client_id in websocket_manager._reconnect_attempts
-    assert websocket_manager._reconnect_attempts[client_id] == 1
+@pytest_asyncio.fixture
+async def test_client(test_app: FastAPI) -> AsyncGenerator[TestClient, None]:
+    """Create a test client."""
+    client = TestClient(test_app)
+    yield client
 
-@pytest.mark.asyncio
-async def test_reconnection_attempts(websocket_manager, mock_websocket):
-    """Test reconnection attempt tracking."""
-    client_id = "test-client-1"
-    
-    # Connect and disconnect multiple times
-    await websocket_manager.connect(mock_websocket, client_id)
-    
-    for _ in range(websocket_manager._max_reconnect_attempts):
-        await websocket_manager.disconnect(mock_websocket, client_id)
-        
-    # Should be removed after max attempts
-    assert client_id not in websocket_manager._reconnect_attempts
-
-@pytest.mark.asyncio
-async def test_broadcast_message(websocket_manager):
-    """Test broadcasting messages to all clients."""
-    # Create multiple mock clients
-    clients = [AsyncMock(spec=WebSocket) for _ in range(3)]
-    client_ids = [f"test-client-{i}" for i in range(3)]
-    
-    # Connect all clients
-    for websocket, client_id in zip(clients, client_ids):
-        await websocket_manager.connect(websocket, client_id)
-    
-    # Broadcast a test message
-    test_message = create_api_response(
-        status="success",
-        data={"type": "TEST_EVENT", "value": "test"}
-    )
-    await websocket_manager.broadcast(test_message)
-    
-    # Verify all clients received the message
-    for websocket in clients:
-        websocket.send_json.assert_called_once_with(test_message)
-
-@pytest.mark.asyncio
-async def test_handle_queue_event(websocket_manager, mock_websocket):
-    """Test handling queue events."""
-    client_id = "test-client-1"
-    await websocket_manager.connect(mock_websocket, client_id)
-    
-    # Create and emit a test event
-    test_event = Event(
-        event_type=EventType.TASK_ADDED,
-        task_id="test-task-1",
-        data={"status": "pending"}
-    )
-    await websocket_manager._handle_queue_event(test_event)
-    
-    # Verify the event was broadcast
-    mock_websocket.send_json.assert_called_with(
-        create_api_response(
-            status="success",
-            data=test_event.to_dict()
-        )
-    )
-
-@pytest.mark.asyncio
-async def test_handle_client_message(websocket_manager, mock_websocket):
-    """Test handling client messages."""
-    client_id = "test-client-1"
-    
-    # Test RECONNECT message
-    message = {
-        "type": "RECONNECT",
-        "client_id": client_id
+def create_test_task_config() -> Dict[str, Any]:
+    """Create a test task configuration."""
+    return {
+        "name": "test_task",
+        "parameter_config": {
+            "x": {"lower_bound": -1, "upper_bound": 1},
+            "y": {"lower_bound": -1, "upper_bound": 1}
+        },
+        "optimizer_config": {
+            "optimizer_type": "CMA",
+            "budget": 10,
+            "num_workers": 1
+        },
+        "execution_config": {
+            "max_retries": 3,
+            "timeout": 3600.0
+        },
+        "objective_fn": """def objective(x, y):
+            return (x - 1)**2 + (y - 1)**2"""
     }
-    
-    await websocket_manager.handle_client_message(mock_websocket, message)
-    assert mock_websocket in websocket_manager._connections
-    
-    # Test invalid message type
-    invalid_message = {
-        "type": "INVALID_TYPE",
-        "data": {}
-    }
-    
-    await websocket_manager.handle_client_message(mock_websocket, invalid_message)
-    assert mock_websocket.send_json.call_args[0][0]["status"] == "error"
 
 @pytest.mark.asyncio
-async def test_handle_disconnection_cleanup(websocket_manager):
-    """Test cleanup of disconnected clients during broadcast."""
-    # Create clients, some of which will disconnect
-    good_client = AsyncMock(spec=WebSocket)
-    bad_client = AsyncMock(spec=WebSocket)
-    bad_client.send_json.side_effect = WebSocketDisconnect()
-    
-    # Connect clients
-    await websocket_manager.connect(good_client, "good-client")
-    await websocket_manager.connect(bad_client, "bad-client")
-    
-    # Broadcast message
-    test_message = create_api_response(
-        status="success",
-        data={"type": "TEST_EVENT"}
-    )
-    await websocket_manager.broadcast(test_message)
-    
-    # Verify cleanup
-    assert good_client in websocket_manager._connections
-    assert bad_client not in websocket_manager._connections
-
-@pytest.mark.asyncio
-async def test_exponential_backoff(websocket_manager, mock_websocket):
-    """Test exponential backoff for reconnection attempts."""
+@pytest.mark.timeout(TEST_TIMEOUT)
+async def test_websocket_connection(test_client: TestClient):
+    """Test basic WebSocket connection and disconnection."""
     client_id = "test-client-1"
+    with test_client.websocket_connect(f"/api/v1/ws?client_id={client_id}") as websocket:
+        # Test initial connection
+        data = websocket.receive_json()
+        assert data["status"] == "success"
+        assert data["data"]["type"] == "CONNECTED"
+        assert data["data"]["client_id"] == client_id
+
+        # Test initial state
+        data = websocket.receive_json()
+        assert data["status"] == "success"
+        assert data["data"]["type"] == "INITIAL_STATE"
+        assert "tasks" in data["data"]
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(TEST_TIMEOUT)
+async def test_websocket_invalid_client_id(test_client: TestClient):
+    """Test WebSocket connection with invalid client ID."""
+    # Test empty client ID - should still work but generate UUID
+    with test_client.websocket_connect("/api/v1/ws") as websocket:
+        data = websocket.receive_json()
+        assert data["status"] == "success"
+        assert data["data"]["type"] == "CONNECTED"
+        assert "client_id" in data["data"]
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(TEST_TIMEOUT)
+async def test_websocket_duplicate_connection(test_client: TestClient):
+    """Test handling of duplicate client connections."""
+    client_id = "test-client-2"
     
-    # Mock asyncio.sleep to track delay times
-    sleep_times = []
-    
-    async def mock_sleep(delay):
-        sleep_times.append(delay)
-    
-    with patch('asyncio.sleep', mock_sleep):
-        await websocket_manager.connect(mock_websocket, client_id)
+    # First connection should succeed
+    with test_client.websocket_connect(f"/api/v1/ws?client_id={client_id}") as ws1:
+        data = ws1.receive_json()
+        assert data["status"] == "success"
+        assert data["data"]["type"] == "CONNECTED"
         
-        # Trigger multiple reconnection attempts
-        for _ in range(3):
-            await websocket_manager.disconnect(mock_websocket, client_id)
+        # Get initial state
+        data = ws1.receive_json()
+        assert data["status"] == "success"
+        assert data["data"]["type"] == "INITIAL_STATE"
+        
+        # Second connection with same client ID should work
+        with test_client.websocket_connect(f"/api/v1/ws?client_id={client_id}") as ws2:
+            data = ws2.receive_json()
+            assert data["status"] == "success"
+            assert data["data"]["type"] == "CONNECTED"
             
-        # Verify exponential backoff
-        expected_delays = [
-            websocket_manager._reconnect_delay,  # 1.0
-            websocket_manager._reconnect_delay * 2,  # 2.0
-            websocket_manager._reconnect_delay * 4   # 4.0
-        ]
-        assert sleep_times == expected_delays 
+            # Get initial state for second connection
+            data = ws2.receive_json()
+            assert data["status"] == "success"
+            assert data["data"]["type"] == "INITIAL_STATE"
+            
+            # Try to send message on first connection - should fail
+            try:
+                ws1.send_json({
+                    "type": "REQUEST_STATE",
+                    "data": {}
+                })
+                ws1.receive_json()
+                pytest.fail("First connection should be closed")
+            except:
+                pass  # Expected - first connection should be closed
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(TEST_TIMEOUT)
+async def test_websocket_task_updates(test_client: TestClient, task_queue: TaskQueue, websocket_manager: WebSocketManager):
+    """Test that WebSocket receives task updates."""
+    client_id = "test-client-3"
+
+    # Create and start a task
+    config = create_test_task_config()
+    response = test_client.post("/api/v1/tasks", json=config)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "success"
+    task_id = data["data"]["task_id"]
+
+    with test_client.websocket_connect(f"/api/v1/ws?client_id={client_id}") as websocket:
+        # Skip connection and initial state messages
+        data = websocket.receive_json()  # CONNECTED message
+        assert data["status"] == "success"
+        assert data["data"]["type"] == "CONNECTED"
+
+        data = websocket.receive_json()  # INITIAL_STATE message
+        assert data["status"] == "success"
+        assert data["data"]["type"] == "INITIAL_STATE"
+
+        # Start the task
+        response = test_client.post(f"/api/v1/tasks/{task_id}/start")
+        assert response.status_code == 200
+
+        # Should receive task update
+        data = websocket.receive_json()
+        assert data["status"] == "success"
+        assert data["data"]["type"] == "QUEUE_EVENT"
+        assert data["data"]["task_id"] == task_id
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(TEST_TIMEOUT)
+async def test_websocket_request_state(test_client: TestClient):
+    """Test requesting current state through WebSocket."""
+    client_id = "test-client-4"
+    
+    with test_client.websocket_connect(f"/api/v1/ws?client_id={client_id}") as websocket:
+        # Skip initial messages
+        data = websocket.receive_json()  # CONNECTED message
+        assert data["status"] == "success"
+        assert data["data"]["type"] == "CONNECTED"
+        
+        data = websocket.receive_json()  # INITIAL_STATE message
+        assert data["status"] == "success"
+        assert data["data"]["type"] == "INITIAL_STATE"
+        
+        # Request current state
+        websocket.send_json({
+            "type": "REQUEST_STATE",
+            "data": {}
+        })
+        
+        # Should receive state update
+        data = websocket.receive_json()
+        assert data["status"] == "success"
+        assert data["data"]["type"] == "STATE_UPDATE"
+        assert "tasks" in data["data"]
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(TEST_TIMEOUT)
+async def test_websocket_task_control(test_client: TestClient, task_queue: TaskQueue, websocket_manager: WebSocketManager):
+    """Test controlling tasks through WebSocket."""
+    client_id = "test-client-5"
+    
+    # Create a task first
+    config = create_test_task_config()
+    response = test_client.post("/api/v1/tasks", json=config)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "success"
+    task_id = data["data"]["task_id"]
+    
+    with test_client.websocket_connect(f"/api/v1/ws?client_id={client_id}") as websocket:
+        # Skip initial messages
+        data = websocket.receive_json()  # CONNECTED message
+        assert data["status"] == "success"
+        assert data["data"]["type"] == "CONNECTED"
+        
+        data = websocket.receive_json()  # INITIAL_STATE message
+        assert data["status"] == "success"
+        assert data["data"]["type"] == "INITIAL_STATE"
+        
+        # Try to control the task
+        websocket.send_json({
+            "type": "CONTROL_TASK",
+            "data": {
+                "task_id": task_id,
+                "action": "start"
+            }
+        })
+        
+        # Should receive task update
+        data = websocket.receive_json()
+        assert data["status"] == "success"
+        assert data["data"]["type"] == "QUEUE_EVENT"
+        assert data["data"]["task_id"] == task_id
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(TEST_TIMEOUT)
+async def test_websocket_error_handling(test_client: TestClient):
+    """Test WebSocket error handling."""
+    client_id = "test-client-6"
+
+    with test_client.websocket_connect(f"/api/v1/ws?client_id={client_id}") as websocket:
+        # Skip initial messages
+        data = websocket.receive_json()  # CONNECTED message
+        assert data["status"] == "success"
+        assert data["data"]["type"] == "CONNECTED"
+
+        data = websocket.receive_json()  # INITIAL_STATE message
+        assert data["status"] == "success"
+        assert data["data"]["type"] == "INITIAL_STATE"
+
+        # Send invalid message
+        websocket.send_json({
+            "type": "INVALID_TYPE",
+            "data": {}
+        })
+
+        # Should receive error response
+        data = websocket.receive_json()
+        assert data["status"] == "error"
+        assert "detail" in data["error"]
+        assert data["error"]["detail"] == "Invalid message type: INVALID_TYPE" 

@@ -82,6 +82,10 @@ async def test_optimization_workflow(test_app: FastAPI):
                 "budget": 100,
                 "num_workers": 4
             },
+            "execution_config": {
+                "max_retries": 3,
+                "timeout": 3600
+            },
             "objective_fn": "def objective(x, y): return (x - 1)**2 + (y - 1)**2"
         }
     )
@@ -108,7 +112,7 @@ async def test_optimization_workflow(test_app: FastAPI):
                     raise TimeoutError("Optimization timed out")
                 
                 try:
-                    data = websocket.receive_json(timeout=1.0)  # 1 second timeout for each receive
+                    data = websocket.receive_json()
                     logger.debug(f"Received WebSocket message: {data}")
                     
                     if "data" not in data:
@@ -141,6 +145,8 @@ async def test_optimization_workflow(test_app: FastAPI):
                 except Exception as e:
                     logger.error(f"Error receiving WebSocket message: {e}", exc_info=True)
                     raise
+                
+                await asyncio.sleep(0.1)  # Small delay to prevent tight loop
             
             # Get final results
             logger.info(f"Getting final results for task {task_id}")
@@ -151,15 +157,15 @@ async def test_optimization_workflow(test_app: FastAPI):
             # Verify results
             logger.info("Verifying optimization results")
             assert result["status"] == "completed", f"Task not completed. Status: {result['status']}"
-            assert "parameters" in result, "No parameters in result"
-            parameters = result["parameters"]
-            assert "x" in parameters and "y" in parameters, f"Missing parameters in result: {parameters}"
+            assert "result" in result, "No result in response"
+            assert "best_params" in result["result"], "No best_params in result"
+            best_params = result["result"]["best_params"]
+            assert "x" in best_params and "y" in best_params, "Missing x or y in best_params"
             
             # Check convergence
-            x, y = parameters["x"], parameters["y"]
-            distance = ((x - 1.0) ** 2 + (y - 1.0) ** 2) ** 0.5
-            logger.info(f"Final distance from minimum: {distance}")
-            assert distance < 0.1, f"Did not converge to minimum. Distance: {distance}"
+            x, y = best_params["x"], best_params["y"]
+            distance = ((x - 1)**2 + (y - 1)**2)**0.5
+            assert distance < 0.1, f"Optimization did not converge to (1,1). Got ({x}, {y}), distance={distance}"
             
     except Exception as e:
         logger.error("Test failed with error", exc_info=True)

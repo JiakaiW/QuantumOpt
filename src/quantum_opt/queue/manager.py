@@ -2,9 +2,10 @@
 import asyncio
 import logging
 import uuid
-from typing import Dict, List, Any, Optional, Union
+from typing import Dict, Any, Optional, List
+
 from .task import OptimizationTask
-from ..utils.events import EventEmitter, EventType, Event, create_task_event
+from ..utils.events import EventEmitter, Event, EventType, create_task_event
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +20,7 @@ class TaskQueue(EventEmitter):
         self._stopped = True
         self._is_paused = False
         self._current_task: Optional[str] = None
+        logger.debug("Task queue initialized")
         
     @property
     def is_processing(self) -> bool:
@@ -35,20 +37,29 @@ class TaskQueue(EventEmitter):
         
         Args:
             config: Task configuration including objective function and parameters
+            
+        Raises:
+            ValueError: If task ID already exists in queue
         """
         try:
             # Generate task ID if not provided
             task_id = config.get("task_id", str(uuid.uuid4()))
+            logger.debug(f"Adding task {task_id} to queue")
+            
+            if task_id in self._tasks:
+                raise ValueError(f"Task {task_id} already exists in queue")
             
             # Create task instance
             task = OptimizationTask(task_id=task_id, config=config)
-            
-            if task.task_id in self._tasks:
-                logger.warning(f"Task {task.task_id} already exists in queue")
-                return
-                
             self._tasks[task.task_id] = task
             task.add_subscriber(self._forward_task_event)
+            logger.debug(f"Added subscriber for task {task_id}")
+            
+            # Forward task events to all subscribers
+            for subscriber in self._subscribers:
+                task.add_subscriber(subscriber)
+                logger.debug(f"Added task {task_id} subscriber: {subscriber}")
+            
             logger.info(f"Added task {task.task_id} to queue")
             
             await self.emit(create_task_event(
@@ -74,7 +85,7 @@ class TaskQueue(EventEmitter):
         if task:
             return task.to_dict()
         return None
-    
+        
     async def list_tasks(self) -> List[Dict[str, Any]]:
         """List all tasks in the queue.
         
@@ -82,47 +93,26 @@ class TaskQueue(EventEmitter):
             List[Dict[str, Any]]: List of task state dictionaries
         """
         return [task.to_dict() for task in self._tasks.values()]
-    
+        
     async def start_processing(self) -> None:
         """Start processing tasks in the queue."""
-        if not self._stopped:
+        if self.is_processing:
             logger.warning("Queue is already processing")
             return
             
+        logger.info("Starting task queue processing")
         self._stopped = False
         self._is_paused = False
+        self._current_task = None
         self._processing_task = asyncio.create_task(self._process_tasks())
         
-    async def pause_processing(self) -> None:
-        """Pause queue processing."""
-        if self._stopped:
-            logger.warning("Queue is not processing")
-            return
-            
-        self._is_paused = True
-        if self._current_task:
-            await self.pause_task(self._current_task)
-            
-    async def resume_processing(self) -> None:
-        """Resume queue processing."""
-        if self._stopped:
-            logger.warning("Queue is not processing")
-            return
-            
-        self._is_paused = False
-        if self._current_task:
-            await self.resume_task(self._current_task)
-            
     async def stop_processing(self) -> None:
-        """Stop queue processing."""
-        if self._stopped:
-            logger.warning("Queue is already stopped")
+        """Stop processing tasks in the queue."""
+        if not self.is_processing:
             return
             
+        logger.info("Stopping task queue processing")
         self._stopped = True
-        if self._current_task:
-            await self.stop_task(self._current_task)
-            
         if self._processing_task:
             self._processing_task.cancel()
             try:
@@ -131,6 +121,38 @@ class TaskQueue(EventEmitter):
                 pass
             self._processing_task = None
             
+        # Reset state
+        self._is_paused = False
+        self._current_task = None
+        # Clear tasks to ensure clean state
+        self._tasks.clear()
+        
+    async def pause_processing(self) -> None:
+        """Pause task queue processing."""
+        if not self.is_processing or self.is_paused:
+            return
+            
+        logger.info("Pausing task queue processing")
+        self._is_paused = True
+        await self.emit(create_task_event(
+            event_type=EventType.QUEUE_PAUSED,
+            task_id="queue",
+            status="paused"
+        ))
+        
+    async def resume_processing(self) -> None:
+        """Resume task queue processing."""
+        if not self.is_processing or not self.is_paused:
+            return
+            
+        logger.info("Resuming task queue processing")
+        self._is_paused = False
+        await self.emit(create_task_event(
+            event_type=EventType.QUEUE_RESUMED,
+            task_id="queue",
+            status="running"
+        ))
+        
     async def _process_tasks(self) -> None:
         """Process tasks in the queue sequentially."""
         logger.info("Starting task queue processing")
@@ -160,10 +182,39 @@ class TaskQueue(EventEmitter):
                 # Process next task
                 task = pending_tasks[0]
                 self._current_task = task.task_id
+                logger.info(f"Processing task {task.task_id}")
+                
                 try:
-                    await task.start_optimization()
+                    # Start task
+                    await task.start()
+                    
+                    # Wait for task to complete
+                    while task.status == "running":
+                        await asyncio.sleep(0.1)
+                    
+                    # Emit event after task completes
+                    if task.status == "completed":
+                        await self.emit(create_task_event(
+                            event_type=EventType.TASK_COMPLETED,
+                            task_id=task.task_id,
+                            status="completed",
+                            result=task.result
+                        ))
+                    elif task.status == "failed":
+                        await self.emit(create_task_event(
+                            event_type=EventType.TASK_FAILED,
+                            task_id=task.task_id,
+                            status="failed",
+                            error=task.error
+                        ))
                 except Exception as e:
                     logger.error(f"Error processing task {task.task_id}: {e}")
+                    await self.emit(create_task_event(
+                        event_type=EventType.TASK_FAILED,
+                        task_id=task.task_id,
+                        status="failed",
+                        error=str(e)
+                    ))
                 finally:
                     self._current_task = None
                     
@@ -228,7 +279,8 @@ class TaskQueue(EventEmitter):
     
     async def _forward_task_event(self, event: Event) -> None:
         """Forward events from tasks."""
-        await self.emit(event) 
+        logger.debug(f"Forwarding task event: {event.to_dict()}")
+        await self.emit(event)
     
     async def start_task(self, task_id: str) -> bool:
         """Start a specific task.
@@ -239,13 +291,15 @@ class TaskQueue(EventEmitter):
         Returns:
             bool: True if task was started, False otherwise
         """
-        if task_id not in self._tasks:
-            logger.warning(f"Task {task_id} not found in queue")
-            return False
-            
-        task = self._tasks[task_id]
         try:
-            await task.start_optimization()
+            task = self._tasks.get(task_id)
+            if task is None:
+                logger.warning(f"Task {task_id} not found")
+                return False
+            
+            # Start the task
+            await task.start()
+            logger.info(f"Started task {task_id}")
             return True
         except Exception as e:
             logger.error(f"Error starting task {task_id}: {e}")

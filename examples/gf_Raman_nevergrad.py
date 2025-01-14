@@ -115,10 +115,9 @@ def optimize_raman_gate():
     }
     
     optimizer_config = {
-        "optimizer": "CMA",
-        "budget": 1000,
-        "num_workers": 4,
-        "batch_size": 4
+        "optimizer_type": "CMA",
+        "budget": 200,
+        "num_workers": 4
     }
     
     execution_config = {

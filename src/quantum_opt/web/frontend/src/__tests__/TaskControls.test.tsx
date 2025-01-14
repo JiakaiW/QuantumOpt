@@ -1,93 +1,92 @@
-import React from 'react';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent } from '@testing-library/react';
 import { TaskControls } from '../components/TaskControls';
-import axios from 'axios';
-
-jest.mock('axios');
-const mockedAxios = axios as jest.Mocked<typeof axios>;
 
 describe('TaskControls', () => {
-    const mockTaskId = 'test-task-123';
-    const mockOnError = jest.fn();
+  const mockHandlers = {
+    onStart: jest.fn(),
+    onPause: jest.fn(),
+    onResume: jest.fn(),
+    onStop: jest.fn()
+  };
 
-    beforeEach(() => {
-        jest.clearAllMocks();
-    });
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
 
-    it('shows resume button when task is paused', () => {
-        render(<TaskControls taskId={mockTaskId} status="paused" onError={mockOnError} />);
-        expect(screen.getByText('Resume')).toBeInTheDocument();
-    });
+  it('renders start button for pending tasks', () => {
+    render(
+      <TaskControls
+        status="pending"
+        {...mockHandlers}
+      />
+    );
+    
+    const startButton = screen.getByText('Start');
+    expect(startButton).toBeInTheDocument();
+    
+    fireEvent.click(startButton);
+    expect(mockHandlers.onStart).toHaveBeenCalled();
+  });
 
-    it('shows pause button when task is running', () => {
-        render(<TaskControls taskId={mockTaskId} status="running" onError={mockOnError} />);
-        expect(screen.getByText('Pause')).toBeInTheDocument();
-    });
+  it('renders pause and stop buttons for running tasks', () => {
+    render(
+      <TaskControls
+        status="running"
+        {...mockHandlers}
+      />
+    );
+    
+    const pauseButton = screen.getByText('Pause');
+    const stopButton = screen.getByText('Stop');
+    expect(pauseButton).toBeInTheDocument();
+    expect(stopButton).toBeInTheDocument();
+    
+    fireEvent.click(pauseButton);
+    expect(mockHandlers.onPause).toHaveBeenCalled();
+    
+    fireEvent.click(stopButton);
+    expect(mockHandlers.onStop).toHaveBeenCalled();
+  });
 
-    it('shows stop button when task is running or paused', () => {
-        render(<TaskControls taskId={mockTaskId} status="running" onError={mockOnError} />);
-        expect(screen.getByText('Stop')).toBeInTheDocument();
+  it('renders resume and stop buttons for paused tasks', () => {
+    render(
+      <TaskControls
+        status="paused"
+        {...mockHandlers}
+      />
+    );
+    
+    const resumeButton = screen.getByText('Resume');
+    const stopButton = screen.getByText('Stop');
+    expect(resumeButton).toBeInTheDocument();
+    expect(stopButton).toBeInTheDocument();
+    
+    fireEvent.click(resumeButton);
+    expect(mockHandlers.onResume).toHaveBeenCalled();
+    
+    fireEvent.click(stopButton);
+    expect(mockHandlers.onStop).toHaveBeenCalled();
+  });
 
-        render(<TaskControls taskId={mockTaskId} status="paused" onError={mockOnError} />);
-        expect(screen.getByText('Stop')).toBeInTheDocument();
-    });
+  it('renders no buttons for completed tasks', () => {
+    render(
+      <TaskControls
+        status="completed"
+        {...mockHandlers}
+      />
+    );
+    
+    expect(screen.queryByRole('button')).not.toBeInTheDocument();
+  });
 
-    it('does not show any buttons for completed tasks', () => {
-        render(<TaskControls taskId={mockTaskId} status="completed" onError={mockOnError} />);
-        expect(screen.queryByRole('button')).not.toBeInTheDocument();
-    });
-
-    it('calls API and handles success when resuming task', async () => {
-        mockedAxios.post.mockResolvedValueOnce({});
-        
-        render(<TaskControls taskId={mockTaskId} status="paused" onError={mockOnError} />);
-        fireEvent.click(screen.getByText('Resume'));
-
-        await waitFor(() => {
-            expect(mockedAxios.post).toHaveBeenCalledWith(
-                `http://localhost:8000/api/queue/task/${mockTaskId}/start`
-            );
-        });
-        expect(mockOnError).not.toHaveBeenCalled();
-    });
-
-    it('calls API and handles success when pausing task', async () => {
-        mockedAxios.post.mockResolvedValueOnce({});
-        
-        render(<TaskControls taskId={mockTaskId} status="running" onError={mockOnError} />);
-        fireEvent.click(screen.getByText('Pause'));
-
-        await waitFor(() => {
-            expect(mockedAxios.post).toHaveBeenCalledWith(
-                `http://localhost:8000/api/queue/task/${mockTaskId}/pause`
-            );
-        });
-        expect(mockOnError).not.toHaveBeenCalled();
-    });
-
-    it('calls API and handles success when stopping task', async () => {
-        mockedAxios.post.mockResolvedValueOnce({});
-        
-        render(<TaskControls taskId={mockTaskId} status="running" onError={mockOnError} />);
-        fireEvent.click(screen.getByText('Stop'));
-
-        await waitFor(() => {
-            expect(mockedAxios.post).toHaveBeenCalledWith(
-                `http://localhost:8000/api/queue/task/${mockTaskId}/stop`
-            );
-        });
-        expect(mockOnError).not.toHaveBeenCalled();
-    });
-
-    it('handles API errors', async () => {
-        const error = new Error('API Error');
-        mockedAxios.post.mockRejectedValueOnce(error);
-        
-        render(<TaskControls taskId={mockTaskId} status="running" onError={mockOnError} />);
-        fireEvent.click(screen.getByText('Stop'));
-
-        await waitFor(() => {
-            expect(mockOnError).toHaveBeenCalledWith(error.message);
-        });
-    });
+  it('renders no buttons for failed tasks', () => {
+    render(
+      <TaskControls
+        status="failed"
+        {...mockHandlers}
+      />
+    );
+    
+    expect(screen.queryByRole('button')).not.toBeInTheDocument();
+  });
 }); 

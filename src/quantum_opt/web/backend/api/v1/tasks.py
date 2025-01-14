@@ -1,33 +1,37 @@
 """Task management API endpoints."""
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from fastapi import APIRouter, HTTPException, Depends
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from quantum_opt.queue import TaskQueue, OptimizationTask
 from ..dependencies import get_task_queue
+from .api_schemas import ParameterConfig, OptimizerConfig, ExecutionConfig
 
 router = APIRouter()
 
 class TaskCreate(BaseModel):
     """Request model for task creation."""
-    name: str
-    parameter_config: dict
-    optimizer_config: dict
-    execution_config: dict
-    source_code: Optional[str] = None
+    name: str = Field(..., description="Name of the optimization task")
+    parameter_config: Dict[str, ParameterConfig] = Field(..., description="Parameter configurations")
+    optimizer_config: OptimizerConfig = Field(..., description="Optimizer configuration")
+    execution_config: ExecutionConfig = Field(default_factory=ExecutionConfig, description="Execution configuration")
+    objective_fn: str = Field(
+        ..., 
+        description="String representation of the objective function to optimize"
+    )
 
 class TaskControl(BaseModel):
     """Request model for task control."""
-    action: str
+    action: str = Field(..., description="Action to perform (start/pause/resume/stop)")
 
 class TaskResponse(BaseModel):
     """Response model for task data."""
-    task_id: str
-    name: str
-    status: str
-    created_at: str
-    source_code: Optional[str] = None
-    result: Optional[dict] = None
-    error: Optional[str] = None
+    task_id: str = Field(..., description="Unique identifier for the task")
+    name: str = Field(..., description="Name of the task")
+    status: str = Field(..., description="Current status of the task")
+    created_at: str = Field(..., description="Timestamp when the task was created")
+    source_code: Optional[str] = Field(None, description="Source code of the objective function")
+    result: Optional[Dict[str, Any]] = Field(None, description="Optimization results if completed")
+    error: Optional[str] = Field(None, description="Error message if failed")
 
 @router.post("", response_model=TaskResponse)
 async def create_task(

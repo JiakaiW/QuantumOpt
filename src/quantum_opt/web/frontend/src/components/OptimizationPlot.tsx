@@ -1,247 +1,205 @@
-import { useEffect, useRef, useMemo, useCallback } from 'react';
-import Chart from 'chart.js/auto';
-import { debounce } from 'lodash';
+import { Box, Typography } from '@mui/material';
+import { Line } from 'react-chartjs-2';
+import {
+  Chart as ChartJS,
+  CategoryScale,
+  LinearScale,
+  PointElement,
+  LineElement,
+  Title,
+  Tooltip,
+  Legend,
+  ChartOptions,
+  ChartData
+} from 'chart.js';
 
-interface OptimizationData {
-  best_value?: number;
-  best_parameters?: Record<string, number>;
-  total_evaluations?: number;
-  optimization_time?: number;
-  optimization_trace?: Array<{
-    iteration: number;
-    value: number;
-    best_value: number;
-    timestamp: string;
-  }>;
+// Register Chart.js components
+ChartJS.register(
+  CategoryScale,
+  LinearScale,
+  PointElement,
+  LineElement,
+  Title,
+  Tooltip,
+  Legend
+);
+
+interface OptimizationTrace {
+  iteration: number;
+  value: number;
+  best_value: number;
+  timestamp: string;
 }
 
-interface Props {
-  taskId: string;
-  data: OptimizationData;
+interface Task {
+  task_id: string;
+  status: string;
+  result?: {
+    optimization_trace: OptimizationTrace[];
+    best_value?: number;
+  };
 }
 
-// Constants for performance optimization
-const MAX_POINTS = 1000; // Maximum number of points to display
-const BUFFER_SIZE = 100; // Number of points to keep in memory
-const UPDATE_INTERVAL = 100; // Milliseconds between updates
+interface OptimizationPlotProps {
+  task: Task;
+}
 
-export function OptimizationPlot({ taskId, data }: Props) {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const chartRef = useRef<Chart | null>(null);
-  const dataBuffer = useRef<{
-    iterations: number[];
-    values: number[];
-    bestValues: number[];
-  }>({ iterations: [], values: [], bestValues: [] });
+export function OptimizationPlot({ task }: OptimizationPlotProps) {
+  if (!task.result?.optimization_trace || task.result.optimization_trace.length === 0) {
+    return (
+      <Box sx={{ height: 400, width: '100%', p: 2, bgcolor: 'background.paper' }}>
+        <Typography variant="body2" color="text.secondary" align="center">
+          No optimization data available
+        </Typography>
+        <Line data={{ datasets: [] }} options={{ responsive: true, maintainAspectRatio: false }} />
+      </Box>
+    );
+  }
 
-  // Memoize data processing function
-  const processData = useCallback((trace: OptimizationData['optimization_trace'] = []) => {
-    const newData = {
-      iterations: [] as number[],
-      values: [] as number[],
-      bestValues: [] as number[]
-    };
-
-    // If we have more points than MAX_POINTS, downsample the data
-    if (trace.length > MAX_POINTS) {
-      const step = Math.ceil(trace.length / MAX_POINTS);
-      for (let i = 0; i < trace.length; i += step) {
-        const point = trace[i];
-        newData.iterations.push(point.iteration);
-        newData.values.push(point.value);
-        newData.bestValues.push(point.best_value);
-      }
-    } else {
-      trace.forEach(point => {
-        newData.iterations.push(point.iteration);
-        newData.values.push(point.value);
-        newData.bestValues.push(point.best_value);
-      });
+  const trace = task.result.optimization_trace;
+  
+  // Debug logs to track data flow
+  console.log('OptimizationPlot received trace:', {
+    length: trace.length,
+    first: trace[0],
+    last: trace[trace.length - 1],
+    task_status: task.status,
+    all_points: trace.map(t => ({
+      iteration: t.iteration,
+      value: t.value,
+      best_value: t.best_value
+    }))
+  });
+  
+  // Filter out any points with undefined values
+  const validTrace = trace.filter(point => {
+    const isValid = typeof point.iteration === 'number' && 
+                   typeof point.value === 'number' &&
+                   typeof point.best_value === 'number';
+    if (!isValid) {
+      console.warn('Invalid trace point:', point);
     }
+    return isValid;
+  });
 
-    return newData;
-  }, []);
+  console.log('Valid trace points:', {
+    total: trace.length,
+    valid: validTrace.length,
+    points: validTrace
+  });
 
-  // Process and buffer new data
-  useEffect(() => {
-    if (!data.optimization_trace) return;
+  // Only proceed if we have valid data points
+  if (validTrace.length === 0) {
+    return (
+      <Typography variant="body2" color="text.secondary" align="center">
+        Waiting for valid optimization data...
+      </Typography>
+    );
+  }
 
-    const newData = processData(data.optimization_trace);
-    dataBuffer.current = newData;
-  }, [data.optimization_trace, processData]);
+  // Use the actual evaluated values for each iteration
+  const evaluatedValues = validTrace.map((point) => ({
+    x: point.iteration,
+    y: point.value  // Always use the evaluated value
+  }));
 
-  // Debounced update function with TypedArray support
-  const updateChart = useMemo(
-    () =>
-      debounce((chart: Chart) => {
-        if (!chart || !dataBuffer.current) return;
+  // For best values, create a monotonically decreasing sequence
+  let currentBest = Infinity;
+  const bestValues = validTrace.map((point) => {
+    currentBest = Math.min(currentBest, point.best_value);
+    return {
+      x: point.iteration,
+      y: currentBest
+    };
+  });
 
-        const { iterations, values, bestValues } = dataBuffer.current;
+  console.log('Plot data:', {
+    evaluatedValues,
+    bestValues
+  });
 
-        // Use TypedArrays for better performance
-        const iterationsArray = Float64Array.from(iterations);
-        const valuesArray = Float64Array.from(values);
-        const bestValuesArray = Float64Array.from(bestValues);
+  const maxIteration = Math.max(...validTrace.map(p => p.iteration));
+  const maxValue = Math.max(...evaluatedValues.map(p => p.y));
+  const minValue = Math.min(...evaluatedValues.map(p => p.y));
+  const valueMargin = (maxValue - minValue) * 0.1;
 
-        chart.data.labels = Array.from(iterationsArray);
-        chart.data.datasets[0].data = Array.from(valuesArray);
-        chart.data.datasets[1].data = Array.from(bestValuesArray);
+  const chartData: ChartData<'line'> = {
+    datasets: [
+      {
+        label: 'Evaluated Values',
+        data: evaluatedValues,
+        borderColor: 'rgba(75, 192, 192, 0.8)',
+        backgroundColor: 'rgba(75, 192, 192, 0.8)',
+        pointRadius: 4,
+        pointHoverRadius: 6,
+        showLine: false,
+        order: 2
+      },
+      {
+        label: 'Best Value',
+        data: bestValues,
+        borderColor: 'rgba(255, 99, 132, 1)',
+        backgroundColor: 'rgba(255, 99, 132, 0.2)',
+        pointRadius: 0,
+        borderWidth: 2,
+        tension: 0,
+        fill: false,
+        order: 1
+      }
+    ]
+  };
 
-        // Use requestAnimationFrame for smooth updates
-        requestAnimationFrame(() => {
-          chart.update('none'); // Use 'none' mode for better performance
-        });
-      }, UPDATE_INTERVAL),
-    []
-  );
-
-  useEffect(() => {
-    if (!canvasRef.current) return;
-
-    // Create or update chart
-    if (!chartRef.current) {
-      const ctx = canvasRef.current.getContext('2d');
-      if (!ctx) return;
-
-      chartRef.current = new Chart(ctx, {
-        type: 'line',
-        data: {
-          labels: [],
-          datasets: [
-            {
-              label: 'Current Value',
-              data: [],
-              borderColor: '#000',
-              backgroundColor: 'transparent',
-              borderWidth: 1,
-              pointRadius: 0,
-              tension: 0.1,
-              spanGaps: true // Improve performance by spanning gaps
-            },
-            {
-              label: 'Best Value',
-              data: [],
-              borderColor: '#000',
-              backgroundColor: 'transparent',
-              borderWidth: 2,
-              pointRadius: 0,
-              tension: 0.1,
-              spanGaps: true
-            }
-          ]
+  const chartOptions: ChartOptions<'line'> = {
+    responsive: true,
+    maintainAspectRatio: false,
+    animation: {
+      duration: 0 // Disable animations for better performance
+    },
+    scales: {
+      x: {
+        type: 'linear',
+        display: true,
+        title: {
+          display: true,
+          text: 'Iteration'
         },
-        options: {
-          responsive: true,
-          maintainAspectRatio: false,
-          animation: false, // Disable animations for better performance
-          parsing: false, // Disable parsing for better performance
-          normalized: true, // Enable normalized stacks for better performance
-          elements: {
-            line: {
-              cubicInterpolationMode: 'monotone' // Smoother lines with better performance
-            }
-          },
-          scales: {
-            y: {
-              type: 'logarithmic',
-              min: 0,
-              grid: {
-                color: '#f0f0f0',
-                display: true
-              },
-              border: {
-                display: false
-              },
-              ticks: {
-                callback: (value: string | number) => 
-                  typeof value === 'number' ? value.toExponential(1) : value,
-                font: {
-                  size: 10,
-                  family: '-apple-system, system-ui, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif'
-                },
-                color: '#000',
-                padding: 8,
-                maxTicksLimit: 8 // Limit number of ticks for better performance
-              }
-            },
-            x: {
-              grid: {
-                display: false
-              },
-              border: {
-                display: false
-              },
-              ticks: {
-                font: {
-                  size: 10,
-                  family: '-apple-system, system-ui, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif'
-                },
-                color: '#000',
-                padding: 8,
-                maxTicksLimit: 10, // Limit number of ticks for better performance
-                source: 'auto' // Let Chart.js decide the best ticks
-              }
-            }
-          },
-          plugins: {
-            legend: {
-              position: 'top',
-              align: 'end',
-              labels: {
-                boxWidth: 12,
-                padding: 15,
-                font: {
-                  size: 11,
-                  family: '-apple-system, system-ui, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif'
-                },
-                color: '#000',
-                usePointStyle: true
-              }
-            },
-            decimation: {
-              enabled: true,
-              algorithm: 'min-max' // Use min-max decimation for better visual representation
-            }
-          }
+        min: 0,
+        max: maxIteration + 1,
+        ticks: {
+          stepSize: Math.max(1, Math.floor(maxIteration / 10))
         }
-      });
-    }
-
-    // Update chart data
-    updateChart(chartRef.current);
-
-    return () => {
-      if (chartRef.current) {
-        chartRef.current.destroy();
-        chartRef.current = null;
+      },
+      y: {
+        type: 'linear',
+        display: true,
+        title: {
+          display: true,
+          text: 'Objective Value'
+        },
+        min: minValue - valueMargin,
+        max: maxValue + valueMargin
       }
-    };
-  }, [taskId, updateChart]);
+    },
+    plugins: {
+      legend: {
+        display: true,
+        position: 'top',
+        labels: {
+          usePointStyle: true,
+          pointStyle: 'circle'
+        }
+      },
+      tooltip: {
+        enabled: true,
+        mode: 'nearest',
+        intersect: true
+      }
+    }
+  };
 
   return (
-    <div style={{ 
-      padding: '1rem 0',
-      height: '300px'
-    }}>
-      <canvas ref={canvasRef} />
-      {data.best_value !== undefined && (
-        <div style={{ 
-          marginTop: '1.5rem',
-          fontSize: '0.75rem',
-          color: '#000',
-          display: 'flex',
-          gap: '1.5rem',
-          justifyContent: 'flex-end'
-        }}>
-          <div>Best Value: {data.best_value.toExponential(4)}</div>
-          {data.total_evaluations !== undefined && (
-            <div>Evaluations: {data.total_evaluations}</div>
-          )}
-          {data.optimization_time !== undefined && (
-            <div>Time: {data.optimization_time.toFixed(2)}s</div>
-          )}
-        </div>
-      )}
-    </div>
+    <Box sx={{ height: 400, width: '100%', p: 2, bgcolor: 'background.paper' }}>
+      <Line data={chartData} options={chartOptions} />
+    </Box>
   );
 } 

@@ -17,6 +17,7 @@ class EventType(Enum):
     QUEUE_ERROR = auto()
     
     # Task Events
+    TASK_CREATED = auto()  # Added for task creation events
     TASK_ADDED = auto()
     TASK_STARTED = auto()
     TASK_COMPLETED = auto()
@@ -26,12 +27,14 @@ class EventType(Enum):
     TASK_STOPPED = auto()
     TASK_REMOVED = auto()  # Added for task removal events
     TASK_STATUS_CHANGED = auto()  # General status change event
+    TASK_PROGRESS = auto()  # Added for progress updates
     
     # Optimization Events
     ITERATION_COMPLETED = auto()  # More descriptive than just ITERATION
     NEW_BEST_FOUND = auto()      # More descriptive than just NEW_BEST
     OPTIMIZATION_COMPLETED = auto()  # Consistent naming
     OPTIMIZATION_ERROR = auto()      # Specific optimization errors
+    OPTIMIZATION_PROGRESS = auto()   # Added for progress updates
     
     # System Events
     ERROR = auto()
@@ -100,17 +103,17 @@ class Event:
         
         Args:
             event_type: Type of the event
-            task_id: Optional ID of the task this event relates to
-            data: Additional event data
+            task_id: Optional task ID associated with the event
+            data: Optional data payload
         """
-        self.type = event_type
+        self.event_type = event_type
         self.task_id = task_id
         self.data = data or {}
         
     def to_dict(self) -> Dict[str, Any]:
         """Convert event to dictionary format."""
         return {
-            "type": self.type.name,
+            "event_type": self.event_type.name,
             "task_id": self.task_id,
             "data": self.data
         }

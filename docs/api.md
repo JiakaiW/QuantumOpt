@@ -1,447 +1,301 @@
 # QuantumOpt API Documentation
 
 ## Overview
-
-The QuantumOpt API provides endpoints for managing optimization tasks, monitoring their progress, and controlling their execution. The API is organized around REST principles and uses standard HTTP response codes. All responses are in JSON format.
+The QuantumOpt API provides endpoints for managing optimization tasks, controlling the task queue, and receiving real-time updates via WebSocket connections.
 
 ## Base URL
-
 ```
 http://localhost:8000/api/v1
 ```
 
 ## Authentication
+Currently, no authentication is required.
 
-Currently, the API does not require authentication. Future versions will implement authentication.
+## Standard Response Format
+All API endpoints return responses in a standardized format:
+
+```json
+{
+  "status": "success" | "error",
+  "data": { ... } | null,
+  "error": { "message": "Error description" } | null
+}
+```
 
 ## Task Management
 
 ### Create Task
+`POST /tasks`
 
 Create a new optimization task.
 
-```http
-POST /tasks
-```
-
-#### Request Body
-
+**Request Body:**
 ```json
 {
-    "name": "Example Optimization",
-    "parameter_config": {
-        "param1": {
-            "lower_bound": 0.0,
-            "upper_bound": 1.0,
-            "init": 0.5,
-            "scale": "linear"
-        }
-    },
-    "optimizer_config": {
-        "optimizer_type": "OnePlusOne",
-        "budget": 100,
-        "num_workers": 1
-    },
-    "execution_config": {
-        "max_retries": 3,
-        "timeout": 3600
-    },
-    "objective_fn": "def objective(param1):\n    return param1 ** 2"
+  "name": "string",
+  "parameter_config": {
+    "param_name": {
+      "lower_bound": float,
+      "upper_bound": float,
+      "init": float | null,
+      "scale": "linear" | "log"
+    }
+  },
+  "optimizer_config": {
+    "optimizer_type": "CMA" | "OnePlusOne",
+    "budget": int,
+    "num_workers": int
+  },
+  "execution_config": {
+    "max_retries": int,
+    "timeout": float
+  },
+  "objective_fn": "string"
 }
 ```
 
-The `objective_fn` field accepts a string containing a Python function definition. This design enables:
-- Frontend display of the optimization objective
-- Dynamic function creation without security risks
-- Easy serialization and storage
-- Support for arbitrary Python functions
+- `name`: Name of the optimization task
+- `parameter_config`: Dictionary mapping parameter names to their configurations
+  - `lower_bound`: Lower bound for the parameter
+  - `upper_bound`: Upper bound for the parameter
+  - `init`: Optional initial value (defaults to middle of bounds)
+  - `scale`: Scale type for the parameter ("linear" or "log")
+- `optimizer_config`: Configuration for the optimizer
+  - `optimizer_type`: Type of optimizer to use ("CMA" or "OnePlusOne")
+  - `budget`: Number of function evaluations allowed
+  - `num_workers`: Number of parallel workers (default: 1)
+- `execution_config`: Optional configuration for task execution
+  - `max_retries`: Maximum number of retries for failed evaluations (default: 3)
+  - `timeout`: Timeout in seconds for the optimization (default: 3600.0)
+- `objective_fn`: String representation of the objective function to optimize
 
-Requirements for the objective function:
-1. Must be a valid Python function definition
-2. Function name must match the string after "def " and before "("
-3. Parameters must match the keys in parameter_config
-4. Must return a float value to minimize
-5. Can use standard Python math operations and functions
-
-Example objective functions:
-```python
-# Simple quadratic
-def objective(x):
-    return x ** 2
-
-# Multi-parameter optimization
-def objective(x, y, z):
-    return x**2 + y**2 + z**2
-
-# With mathematical functions
-def objective(theta, phi):
-    import math
-    return math.sin(theta)**2 + math.cos(phi)**2
-```
-
-#### Response
-
+**Response:**
 ```json
 {
-    "status": "success",
-    "data": {
-        "task_id": "550e8400-e29b-41d4-a716-446655440000",
-        "status": "pending",
-        "config": {
-            "name": "Example Optimization",
-            "parameter_config": {...},
-            "optimizer_config": {...},
-            "execution_config": {...}
-        }
-    }
+  "status": "success",
+  "data": {
+    "task_id": "string",
+    "status": "pending"
+  }
 }
 ```
 
-### Get Task Status
+### Get Task
+`GET /tasks/{task_id}`
 
-Retrieve the status of a specific task.
+Get the state of a specific task.
 
-```http
-GET /tasks/{task_id}
-```
-
-#### Response
-
+**Response:**
 ```json
 {
-    "status": "success",
-    "data": {
-        "task_id": "550e8400-e29b-41d4-a716-446655440000",
-        "status": "running",
-        "config": {...},
-        "result": {
-            "best_params": {...},
-            "best_value": 0.123,
-            "iterations": 50,
-            "total_evaluations": 75
-        }
-    }
+  "status": "success",
+  "data": {
+    "task_id": "string",
+    "status": "pending" | "running" | "paused" | "completed" | "failed" | "stopped",
+    "config": { ... },
+    "result": { ... } | null,
+    "error": "string" | null
+  }
 }
 ```
 
 ### List Tasks
+`GET /tasks`
 
-Retrieve all tasks.
+Get a list of all tasks.
 
-```http
-GET /tasks
-```
-
-#### Response
-
+**Response:**
 ```json
 {
-    "status": "success",
-    "data": {
-        "tasks": [
-            {
-                "task_id": "550e8400-e29b-41d4-a716-446655440000",
-                "status": "running",
-                "config": {...},
-                "result": {...}
-            }
-        ]
-    }
+  "status": "success",
+  "data": {
+    "tasks": [
+      {
+        "task_id": "string",
+        "status": "string",
+        "config": { ... },
+        "result": { ... } | null,
+        "error": "string" | null
+      }
+    ]
+  }
 }
 ```
 
 ### Control Task
+The following endpoints control task execution:
 
-Control task execution with pause, resume, or stop operations.
+#### Start Task
+`POST /tasks/{task_id}/start`
 
-```http
-POST /tasks/{task_id}/pause
-POST /tasks/{task_id}/resume
-POST /tasks/{task_id}/stop
-```
+Start or resume a task.
 
-#### Response
+#### Pause Task
+`POST /tasks/{task_id}/pause`
 
+Pause a running task.
+
+#### Resume Task
+`POST /tasks/{task_id}/resume`
+
+Resume a paused task.
+
+#### Stop Task
+`POST /tasks/{task_id}/stop`
+
+Stop a task.
+
+**Response (all control endpoints):**
 ```json
 {
-    "status": "success",
-    "data": {
-        "task_id": "550e8400-e29b-41d4-a716-446655440000",
-        "status": "paused"
-    }
+  "status": "success",
+  "data": {
+    "task_id": "string",
+    "status": "string"
+  }
 }
 ```
 
 ## Queue Management
 
 ### Get Queue Status
+`GET /queue/status`
 
 Get the current status of the task queue.
 
-```http
-GET /queue/status
-```
-
-#### Response
-
+**Response:**
 ```json
 {
-    "status": "success",
-    "data": {
-        "active_task_id": "550e8400-e29b-41d4-a716-446655440000",
-        "task_count": 5,
-        "is_processing": true,
-        "is_paused": false
-    }
+  "status": "success",
+  "data": {
+    "active_task_id": "string" | null,
+    "task_count": int,
+    "is_processing": boolean,
+    "is_paused": boolean
+  }
 }
 ```
 
 ### Control Queue
+`POST /queue/control`
 
-Control the queue's operation.
+Control the task queue's operation.
 
-```http
-POST /queue/control
-```
-
-#### Request Body
-
+**Request Body:**
 ```json
 {
-    "action": "start"
+  "action": "start" | "pause" | "resume" | "stop"
 }
 ```
 
-#### Response
-
+**Response:**
 ```json
 {
-    "status": "success",
-    "data": {
-        "active_task_id": "550e8400-e29b-41d4-a716-446655440000",
-        "task_count": 5,
-        "is_processing": true,
-        "is_paused": false
-    }
+  "status": "success",
+  "data": {
+    "active_task_id": "string" | null,
+    "task_count": int,
+    "is_processing": boolean,
+    "is_paused": boolean
+  }
 }
 ```
 
 ## Real-time Updates
 
 ### WebSocket Connection
+`WS /ws?client_id={optional_client_id}`
 
-Connect to receive real-time updates about tasks.
+Connect to receive real-time updates about tasks and queue status.
 
-```
-WebSocket: /api/v1/ws
-```
-
-Optional query parameter:
-- `client_id`: For reconnection support
-
-#### Connection Message
-
+#### Message Format
+All WebSocket messages follow this format:
 ```json
 {
-    "status": "success",
-    "data": {
-        "type": "CONNECTED",
-        "client_id": "client-123"
-    }
+  "type": "string",
+  "data": { ... }
 }
 ```
 
-#### Event Messages
-
-Task Added:
+#### Connection Flow
+1. Client connects to WebSocket endpoint
+2. Server sends connection confirmation:
 ```json
 {
-    "status": "success",
-    "data": {
-        "type": "TASK_ADDED",
-        "task_id": "550e8400-e29b-41d4-a716-446655440000",
-        "data": {
-            "status": "pending",
-            "config": {...}
-        }
-    }
+  "status": "success",
+  "data": {
+    "type": "CONNECTED",
+    "client_id": "string"
+  }
 }
 ```
 
-Optimization Update:
+3. Server sends initial state:
 ```json
 {
-    "status": "success",
-    "data": {
-        "type": "ITERATION_COMPLETED",
-        "task_id": "550e8400-e29b-41d4-a716-446655440000",
-        "data": {
-            "iteration": 10,
-            "current_value": 0.5,
-            "best_value": 0.1,
-            "parameters": {...}
-        }
-    }
+  "status": "success",
+  "data": {
+    "type": "INITIAL_STATE",
+    "tasks": [ ... ]
+  }
 }
 ```
 
-## Error Responses
+#### Client Messages
 
-The API uses standard HTTP status codes and provides detailed error messages:
-
+Request current state:
 ```json
 {
-    "status": "error",
-    "error": {
-        "message": "Task not found",
-        "details": "No task exists with ID: 550e8400-e29b-41d4-a716-446655440000"
-    }
+  "type": "REQUEST_STATE",
+  "data": {}
 }
 ```
 
-Common error codes:
-- 400: Bad Request (invalid parameters)
-- 404: Not Found (task doesn't exist)
-- 409: Conflict (invalid state transition)
-- 500: Internal Server Error
-
-## Event Types
-
-The following event types are emitted through WebSocket:
-
-### Queue Events
-- `TASK_ADDED`: New task added to queue
-- `TASK_STARTED`: Task execution started
-- `TASK_COMPLETED`: Task finished successfully
-- `TASK_FAILED`: Task failed with error
-- `TASK_STOPPED`: Task stopped by user
-- `QUEUE_STARTED`: Queue processing started
-- `QUEUE_STOPPED`: Queue processing stopped
-- `QUEUE_PAUSED`: Queue processing paused
-- `QUEUE_RESUMED`: Queue processing resumed
-
-### Optimization Events
-- `ITERATION_COMPLETED`: New optimization iteration
-- `NEW_BEST_FOUND`: New best result found
-- `OPTIMIZATION_COMPLETED`: Optimization finished
-- `OPTIMIZATION_ERROR`: Error during optimization
-
-### System Events
-- `CONNECTED`: WebSocket connection established
-- `RECONNECTED`: Client reconnected after disconnect
-- `QUEUE_STATUS`: Queue status update
-- `ERROR`: Error occurred during processing
-
-## Usage Examples
-
-### Creating and Monitoring a Task
-
-1. Create a new task:
-```python
-import requests
-import json
-
-task_config = {
-    "name": "Example Optimization",
-    "parameter_config": {
-        "x": {"lower_bound": -5.0, "upper_bound": 5.0, "scale": "linear"},
-        "y": {"lower_bound": -5.0, "upper_bound": 5.0, "scale": "linear"}
-    },
-    "optimizer_config": {
-        "optimizer_type": "CMA",
-        "budget": 100,
-        "num_workers": 4
-    },
-    "execution_config": {
-        "max_retries": 3,
-        "timeout": 3600
-    },
-    "objective_fn": "def objective(x, y): return x**2 + y**2"
-}
-
-response = requests.post(
-    "http://localhost:8000/api/v1/tasks",
-    json=task_config
-)
-task_id = response.json()["data"]["task_id"]
-```
-
-2. Monitor progress via WebSocket:
-```python
-import websockets
-import asyncio
-
-async def monitor_task():
-    async with websockets.connect(
-        "ws://localhost:8000/api/v1/ws",
-        extra_headers={"Client-ID": "example-client"}
-    ) as websocket:
-        while True:
-            message = await websocket.recv()
-            event = json.loads(message)
-            if event["data"]["type"] == "ITERATION_COMPLETED":
-                print(f"Iteration {event['data']['data']['iteration']}: "
-                      f"Best value = {event['data']['data']['best_value']}")
-
-asyncio.get_event_loop().run_until_complete(monitor_task())
-```
-
-3. Control task execution:
-```python
-# Pause task
-requests.post(f"http://localhost:8000/api/v1/tasks/{task_id}/pause")
-
-# Resume task
-requests.post(f"http://localhost:8000/api/v1/tasks/{task_id}/resume")
-
-# Stop task
-requests.post(f"http://localhost:8000/api/v1/tasks/{task_id}/stop")
-```
-
-4. Control queue:
-```python
-# Start queue processing
-requests.post("http://localhost:8000/api/v1/queue/control", json={"action": "start"})
-
-# Pause queue
-requests.post("http://localhost:8000/api/v1/queue/control", json={"action": "pause"})
-```
-
-## Task States
-
-### Available States
-Tasks can transition through the following states:
-
-| State      | Description                                      |
-|------------|--------------------------------------------------|
-| pending    | Task is queued but not yet started               |
-| running    | Task is currently executing                       |
-| paused     | Task execution is temporarily suspended           |
-| completed  | Task has finished successfully                    |
-| failed     | Task encountered an error during execution        |
-| stopped    | Task was manually stopped by user                 |
-
-### State Transitions
-```
-pending → running → completed
-    ↓        ↓         ↑
-    ↓      paused      ↑
-    ↓        ↓         ↑
-    → → → stopped → → →|
-         failed
-```
-
-### Task Status Response
+Control task:
 ```json
 {
-    "status": "success",
-    "data": {
-        "task_id": "123e4567-e89b-12d3-a456-426614174000",
-        "status": "running",
-        "name": "Example Task",
-        "created_at": "2024-01-01T12:00:00Z",
-        "result": null,
-        "error": null
-    }
+  "type": "CONTROL_TASK",
+  "data": {
+    "task_id": "string",
+    "action": "start" | "pause" | "resume" | "stop"
+  }
 }
-``` 
+```
+
+#### Server Events
+The server sends events in the following format:
+```json
+{
+  "status": "success",
+  "data": {
+    "type": "STATE_UPDATE" | "QUEUE_EVENT" | "TASK_UPDATE",
+    "event_type": "string",
+    "task_id": "string",
+    "data": { ... }
+  }
+}
+```
+
+Event types include:
+- Task lifecycle events: `TASK_CREATED`, `TASK_STARTED`, `TASK_COMPLETED`, etc.
+- Optimization events: `ITERATION_COMPLETED`, `OPTIMIZATION_COMPLETED`
+- Queue events: `QUEUE_STARTED`, `QUEUE_PAUSED`, etc.
+
+## Error Handling
+All endpoints return error responses in the following format:
+```json
+{
+  "status": "error",
+  "error": {
+    "message": "Error description",
+    "type": "ERROR_TYPE" | null
+  }
+}
+```
+
+Common HTTP status codes:
+- 200: Success
+- 400: Bad Request (invalid input)
+- 404: Not Found (task or resource not found)
+- 422: Unprocessable Entity (validation error)
+- 500: Internal Server Error 

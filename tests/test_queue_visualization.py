@@ -1,181 +1,245 @@
-"""Simple example of optimization visualization.
-
-This example demonstrates:
-1. Basic task creation
-2. Real-time monitoring
-3. Simple visualization
-"""
-import asyncio
+"""Tests for optimization visualization."""
+import pytest_asyncio
 import logging
-from typing import AsyncGenerator
-from fastapi.testclient import TestClient
+import uuid
+from typing import AsyncGenerator, Dict, Any
 import pytest
 from fastapi import FastAPI
-
-from quantum_opt.optimizers.optimization_schemas import (
-    OptimizationConfig,
-    ParameterConfig,
-    OptimizerConfig
-)
-from quantum_opt.web.backend.main import app
-from quantum_opt.web.backend.dependencies import get_task_queue, get_websocket_manager
-from quantum_opt.web.backend.task_queue import TaskQueue
+from fastapi.testclient import TestClient
+from fastapi.websockets import WebSocket
+from quantum_opt.queue import TaskQueue
 from quantum_opt.web.backend.websocket_manager import WebSocketManager
+from quantum_opt.web.backend.dependencies import get_task_queue, get_websocket_manager
+import time
+import asyncio
+import json
+from quantum_opt.web.backend.api.v1.router import router as api_router
+from quantum_opt.web.backend.api.v1.ws import router as ws_router
 
 # Set up logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('test_optimization.log'),
+        logging.StreamHandler()
+    ]
+)
 logger = logging.getLogger(__name__)
 
-def create_quadratic_objective() -> str:
-    """Create a simple quadratic objective function with minimum at (1, 1)."""
-    return """def objective(x: float, y: float) -> float:
-    \"\"\"Quadratic function with minimum at (1, 1).\"\"\"
-    return (x - 1.0)**2 + (y - 1.0)**2
-"""
-
-def create_optimization_config() -> OptimizationConfig:
-    """Create a simple optimization configuration."""
-    objective_fn = create_quadratic_objective()
-    
-    return OptimizationConfig(
-        name="Simple Quadratic",
-        parameter_config={
-            "x": ParameterConfig(
-                lower_bound=-5.0,
-                upper_bound=5.0,
-                init=0.0,
-                scale="linear"
-            ),
-            "y": ParameterConfig(
-                lower_bound=-5.0,
-                upper_bound=5.0,
-                init=0.0,
-                scale="linear"
-            )
+def create_quadratic_objective() -> Dict[str, Any]:
+    """Create a simple quadratic optimization task config."""
+    return {
+        "name": "test_quadratic",
+        "parameter_config": {
+            "x": {
+                "lower_bound": -5.0,
+                "upper_bound": 5.0,
+                "scale": "linear"
+            },
+            "y": {
+                "lower_bound": -5.0,
+                "upper_bound": 5.0,
+                "scale": "linear"
+            }
         },
-        optimizer_config=OptimizerConfig(
-            optimizer_type="CMA",
-            budget=50,
-            num_workers=4
-        ),
-        objective_fn=objective_fn,
-        objective_fn_source=objective_fn
-    )
+        "optimizer_config": {
+            "optimizer_type": "CMA",
+            "budget": 100,
+            "num_workers": 4
+        },
+        "execution_config": {
+            "max_retries": 3,
+            "timeout": 3600
+        },
+        "objective_fn": """def objective(x, y):
+    return (x - 1)**2 + (y - 1)**2"""
+    }
 
-@pytest.fixture
-async def initialized_app() -> AsyncGenerator[FastAPI, None]:
-    """Create and initialize the FastAPI application with dependencies."""
-    # Create fresh instances for each test
-    task_queue = TaskQueue()
-    websocket_manager = WebSocketManager()
-    
-    # Override the dependency providers
+@pytest_asyncio.fixture
+async def task_queue() -> AsyncGenerator[TaskQueue, None]:
+    """Create a fresh TaskQueue instance for each test."""
+    queue = TaskQueue()
+    await queue.start_processing()  # Start processing tasks
+    yield queue
+    await queue.stop_processing()  # Stop processing tasks
+
+@pytest_asyncio.fixture
+async def websocket_manager(task_queue: TaskQueue) -> AsyncGenerator[WebSocketManager, None]:
+    """Create a WebSocketManager instance for each test."""
+    manager = WebSocketManager()
+    manager.initialize_queue(task_queue)
+    yield manager
+
+@pytest_asyncio.fixture
+async def test_app(task_queue: TaskQueue, websocket_manager: WebSocketManager) -> AsyncGenerator[FastAPI, None]:
+    """Create a FastAPI test application."""
+    app = FastAPI()
     app.dependency_overrides[get_task_queue] = lambda: task_queue
     app.dependency_overrides[get_websocket_manager] = lambda: websocket_manager
-    
-    # Initialize WebSocket manager with task queue
-    websocket_manager.initialize_queue(task_queue)
-    
+    app.include_router(api_router, prefix="/api/v1")
+    app.include_router(ws_router, prefix="/api/v1/ws")  # Include WebSocket router with correct prefix
     yield app
-    
-    # Cleanup
-    app.dependency_overrides.clear()
 
-@pytest.fixture
-def test_client(initialized_app: FastAPI) -> TestClient:
-    """Create a test client with initialized dependencies."""
-    return TestClient(initialized_app)
+@pytest_asyncio.fixture
+async def test_client(test_app: FastAPI) -> AsyncGenerator[TestClient, None]:
+    """Create a test client."""
+    client = TestClient(test_app)
+    yield client
 
 @pytest.mark.asyncio
-async def test_basic_optimization(test_client: TestClient):
-    """Test basic optimization with visualization."""
-    # Create and submit optimization task
-    config = create_optimization_config()
-    response = test_client.post("/api/v1/tasks", json=config.model_dump())
-    assert response.status_code == 200, f"Failed to create task: {response.json()}"
+@pytest.mark.timeout(10)  # 10 second timeout for the entire test
+async def test_optimization_with_websocket(test_client: TestClient, test_app: FastAPI) -> None:
+    """Test optimization with WebSocket updates and task control."""
+    # Create and submit task
+    task_config = create_quadratic_objective()
+    response = test_client.post("/api/v1/tasks", json=task_config)
+    assert response.status_code == 200
     task_id = response.json()["data"]["task_id"]
-    
-    # Start optimization
-    response = test_client.post("/api/v1/queue/control", json={"action": "start"})
-    assert response.status_code == 200, f"Failed to start optimization: {response.json()}"
-    
-    # Monitor progress
-    progress = []
-    completed = False
-    timeout = 30  # seconds
-    start_time = asyncio.get_event_loop().time()
-    
-    try:
-        with test_client.websocket_connect("/api/v1/ws") as websocket:
-            logger.info("WebSocket connection established")
-            
-            # Monitor optimization progress
-            while not completed and (asyncio.get_event_loop().time() - start_time) < timeout:
+    logger.info(f"Created task with ID: {task_id}")
+
+    # Generate a client ID for WebSocket connection
+    client_id = str(uuid.uuid4())
+    logger.info(f"Using client ID: {client_id}")
+
+    # Connect to WebSocket with client ID
+    with test_client.websocket_connect(f"/api/v1/ws/queue?client_id={client_id}") as websocket:
+        # Start optimization
+        response = test_client.post(f"/api/v1/tasks/{task_id}/start")
+        assert response.status_code == 200
+        logger.info("Started task")
+
+        # Track optimization progress
+        start_time = time.time()
+        best_value = float('inf')
+        iteration_count = 0
+        
+        while time.time() - start_time < 10:  # 10 second timeout
+            try:
+                # Use asyncio timeout for receiving messages
                 try:
-                    data = websocket.receive_json()
-                    logger.debug(f"Received WebSocket data: {data}")
-                    
-                    if not isinstance(data, dict):
-                        logger.warning(f"Unexpected WebSocket data format: {data}")
-                        continue
-                        
-                    if data.get("status") != "success":
-                        logger.warning(f"Unsuccessful WebSocket message: {data}")
-                        continue
-                    
-                    event = data.get("data", {})
-                    if not isinstance(event, dict):
-                        continue
-                        
-                    event_type = event.get("type")
-                    if event_type == "ITERATION_COMPLETED" and event.get("task_id") == task_id:
-                        best_x = event.get("best_x", {})
-                        current_progress = {
-                            'iteration': len(progress),
-                            'value': event.get("best_y"),
-                            'x': best_x.get("x"),
-                            'y': best_x.get("y")
-                        }
-                        progress.append(current_progress)
-                        
-                        logger.info(
-                            f"Iteration {current_progress['iteration']}: "
-                            f"f({current_progress['x']:.3f}, {current_progress['y']:.3f}) = "
-                            f"{current_progress['value']:.6f}"
-                        )
-                            
-                    elif event_type == "TASK_COMPLETED" and event.get("task_id") == task_id:
-                        completed = True
-                        
-                        # Get final results
-                        response = test_client.get(f"/api/v1/tasks/{task_id}")
-                        assert response.status_code == 200, f"Failed to get task results: {response.json()}"
-                        result = response.json()["data"]["result"]
-                        
-                        logger.info("\nOptimization Results:")
-                        logger.info(
-                            f"Best parameters: x = {result['best_params']['x']:.6f}, "
-                            f"y = {result['best_params']['y']:.6f}"
-                        )
-                        logger.info(f"Best value: {result['best_value']:.6f}")
-                        logger.info(f"Total evaluations: {result['total_evaluations']}")
-                        
-                        # Verify convergence
-                        assert abs(result['best_params']['x'] - 1.0) < 0.1, "x did not converge to minimum"
-                        assert abs(result['best_params']['y'] - 1.0) < 0.1, "y did not converge to minimum"
-                        assert result['best_value'] < 0.01, "function value did not reach minimum"
-                        break
-                        
-                except Exception as e:
-                    logger.error(f"Error processing WebSocket message: {e}")
+                    async with asyncio.timeout(5.0):  # 5 second timeout for each message
+                        message = websocket.receive_json()
+                except asyncio.TimeoutError:
+                    logger.error("Timeout waiting for WebSocket message")
+                    raise
+
+                logger.debug(f"Received WebSocket message: {message}")
+                
+                if "data" not in message:
                     continue
                     
-    except Exception as e:
-        logger.error(f"WebSocket connection error: {e}")
-        raise
-        
-    assert completed, "Optimization did not complete within timeout"
-    assert len(progress) > 0, "No optimization progress was recorded"
+                event_data = message["data"]
+                event_type = event_data.get("type")
+                
+                if event_type == "TASK_STATUS_CHANGED":
+                    status = event_data.get("status")
+                    logger.info(f"Task status changed to: {status}")
+                    
+                    if status == "completed":
+                        # Verify final result
+                        response = test_client.get(f"/api/v1/tasks/{task_id}")
+                        assert response.status_code == 200
+                        task_state = response.json()["data"]
+                        result = task_state["result"]
+                        assert "best_params" in result
+                        best_params = result["best_params"]
+                        distance = ((best_params["x"] - 1)**2 + (best_params["y"] - 1)**2)**0.5
+                        assert distance < 0.1, f"Optimization did not converge. Distance from minimum: {distance}"
+                        logger.info("Task completed successfully")
+                        return
+                    elif status == "failed":
+                        error = event_data.get("error", "Unknown error")
+                        logger.error(f"Task failed: {error}")
+                        assert False, f"Task failed: {error}"
+                        
+                elif event_type == "ITERATION_COMPLETED":
+                    # Track optimization progress
+                    iteration_data = event_data.get("data", {})
+                    current_value = iteration_data.get("best_value")
+                    if current_value is not None:
+                        best_value = min(best_value, current_value)
+                        iteration_count += 1
+                        logger.info(f"Iteration {iteration_count}: best value = {best_value}")
+                        
+                        # Test pause/resume functionality after a few iterations
+                        if iteration_count == 2:
+                            # Pause optimization
+                            response = test_client.post(f"/api/v1/tasks/{task_id}/pause")
+                            assert response.status_code == 200
+                            logger.info("Paused task")
+                            
+                            # Wait a bit
+                            await asyncio.sleep(1)
+                            
+                            # Resume optimization
+                            response = test_client.post(f"/api/v1/tasks/{task_id}/resume")
+                            assert response.status_code == 200
+                            logger.info("Resumed task")
+                
+            except Exception as e:
+                logger.error(f"Error processing WebSocket message: {e}")
+                raise
 
-if __name__ == "__main__":
-    pytest.main([__file__, "-v", "--log-cli-level=INFO"]) 
+        assert False, "Optimization did not complete within timeout"
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(7)  # 7 second timeout for the control test
+async def test_optimization_control(test_client: TestClient) -> None:
+    """Test task control operations."""
+    # Create task
+    task_config = create_quadratic_objective()
+    response = test_client.post("/api/v1/tasks", json=task_config)
+    assert response.status_code == 200
+    task_id = response.json()["data"]["task_id"]
+    logger.info(f"Created task with ID: {task_id}")
+
+    # Test start
+    response = test_client.post(f"/api/v1/tasks/{task_id}/start")
+    assert response.status_code == 200
+    logger.info("Started task")
+
+    # Wait for task to start running
+    start_time = time.time()
+    while time.time() - start_time < 5:
+        response = test_client.get(f"/api/v1/tasks/{task_id}")
+        assert response.status_code == 200
+        task_state = response.json()["data"]
+        if task_state["status"] == "running":
+            break
+        await asyncio.sleep(0.1)
+    else:
+        assert False, "Task did not start running within timeout"
+
+    # Test pause
+    response = test_client.post(f"/api/v1/tasks/{task_id}/pause")
+    assert response.status_code == 200
+    logger.info("Paused task")
+
+    # Verify paused state
+    response = test_client.get(f"/api/v1/tasks/{task_id}")
+    assert response.status_code == 200
+    task_state = response.json()["data"]
+    assert task_state["status"] == "paused", "Task should be paused"
+
+    # Test resume
+    response = test_client.post(f"/api/v1/tasks/{task_id}/resume")
+    assert response.status_code == 200
+    logger.info("Resumed task")
+
+    # Verify running state
+    response = test_client.get(f"/api/v1/tasks/{task_id}")
+    assert response.status_code == 200
+    task_state = response.json()["data"]
+    assert task_state["status"] == "running", "Task should be running"
+
+    # Test stop
+    response = test_client.post(f"/api/v1/tasks/{task_id}/stop")
+    assert response.status_code == 200
+    logger.info("Stopped task")
+
+    # Verify stopped state
+    response = test_client.get(f"/api/v1/tasks/{task_id}")
+    assert response.status_code == 200
+    task_state = response.json()["data"]
+    assert task_state["status"] == "stopped", "Task should be stopped" 

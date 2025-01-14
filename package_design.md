@@ -2,7 +2,7 @@
 
 ## Immediate Implementation Plan
 
-### Phase 1: Core Optimization (Current Focus)
+### Phase 1: Core Optimization (✓ Completed)
 1. **Basic Optimization Engine**
    - ✓ Nevergrad-based parallel optimization
    - ✓ Parameter configuration
@@ -13,42 +13,41 @@
    - ✓ Sequential task execution
    - ✓ Basic task state management
    - ✓ Start/Stop/Pause controls
-   - ✗ Advanced queue features (defer to Phase 3)
+   - ✓ Event emission for task status changes
 
-3. **Simple Web Interface**
+### Phase 2: Working Example (Current Focus)
+1. **Simple Quadratic Example**
+   - ✓ Quadratic function optimization
+   - ✓ Task queue integration
+   - ✓ Basic test coverage
+
+2. **Minimal Web Interface**
    - Essential Components Only:
-   - [ ] Basic FastAPI endpoints
-     - POST /tasks (create task)
-     - GET /tasks (list tasks)
-     - POST /tasks/{id}/control (control task)
-   - [ ] Minimal React frontend
-     - Task list view
-     - Real-time progress plots
-     - Basic controls (start/stop)
-   - [ ] WebSocket for updates
-     - Task status changes
-     - Optimization progress
+   - [ ] FastAPI Backend
+     - ✓ POST /tasks (create task)
+     - ✓ GET /tasks (list tasks)
+     - ✓ POST /tasks/{id}/control (control task)
+     - ✓ WebSocket for updates
+   - [ ] Simple HTML/JS Frontend (No React)
+     - [ ] Task submission form
+     - [ ] Task list view
+     - [ ] Basic controls (start/stop)
+     - [ ] Progress display
 
-### Phase 2: Example Implementation
-1. **Working Example**
-   - [ ] Simple quadratic optimization
-   - [ ] Real-time visualization
-   - [ ] Basic parameter tuning
-
-2. **Documentation**
-   - [ ] Quick start guide
-   - [ ] Example code
+3. **Documentation**
+   - [ ] Quick start guide with quadratic example
    - [ ] API reference
+   - [ ] Example code
 
 ### Phase 3: Future Enhancements (Post-MVP)
-- Advanced queue management
+- React frontend with advanced visualization
 - Task persistence
-- Advanced visualization
+- Advanced queue features
 - Custom optimization strategies
 - Resource management
 - Authentication
 
-## Directory Structure (Essential Components)
+## Directory Structure (Current)
 
 ```
 src/quantum_opt/
@@ -56,67 +55,69 @@ src/quantum_opt/
 │   ├── global_optimizer.py     # Nevergrad implementation
 │   └── base_optimizer.py       # Base class
 ├── queue/
-│   ├── task.py                # Basic task management
-│   └── manager.py             # Simple queue
+│   ├── task.py                # Task management
+│   └── manager.py             # Queue implementation
 ├── web/
 │   ├── backend/
 │   │   ├── main.py           # FastAPI app
-│   │   └── api/              # Basic endpoints
-│   └── frontend/
-       └── src/
-           ├── App.tsx         # Main view
-           └── components/     # Essential components
+│   │   └── api/              # API endpoints
+│   └── examples/
+       └── simple-ui/         # Basic HTML/JS interface
+           ├── index.html     # Task submission & control
+           └── script.js      # WebSocket handling
 ```
 
 ## Implementation Strategy
 
-### 1. Core Functionality First
-- Focus on getting a working optimization loop
-- Implement basic task management
-- Create minimal but functional UI
+### 1. Complete Simple UI Example
+- Create basic HTML form for task submission
+- Add WebSocket connection for updates
+- Display optimization progress
+- Implement basic controls
 
-### 2. Example-Driven Development
-- Build and test with a simple quadratic optimization
-- Use this to verify all components
-- Document as we go
+### 2. Testing & Documentation
+- End-to-end test with quadratic optimization
+- Document setup and usage
+- Add example code
 
-### 3. Iterative Enhancement
-- Get basic version working end-to-end
-- Add features based on actual usage
-- Defer complex features
+### 3. Validate & Iterate
+- Test with real use cases
+- Fix critical issues
+- Gather feedback
 
 ## Testing Strategy
 
-### Essential Tests
-1. **Core Components**
-   - Optimizer functionality
-   - Task state management
-   - Basic API endpoints
+### Core Tests (✓ Completed)
+- ✓ Optimizer functionality
+- ✓ Task state management
+- ✓ Queue operations
+- ✓ Event emission
 
-2. **Integration**
-   - End-to-end optimization flow
-   - WebSocket communication
-   - UI updates
+### Integration Tests (Current Focus)
+- [ ] End-to-end optimization flow
+- [ ] WebSocket communication
+- [ ] UI interaction
 
 ## Next Steps
 
-1. **Complete Core Components**
-   - Finish basic optimizer implementation
-   - Implement minimal task queue
-   - Create basic web interface
+1. **Create Simple UI**
+   - Basic HTML form for task creation
+   - WebSocket connection for updates
+   - Progress display
+   - Start/stop controls
 
-2. **Create Working Example**
-   - Implement quadratic optimization
-   - Add real-time visualization
-   - Document usage
+2. **Document Usage**
+   - Quick start guide
+   - API reference
+   - Example code
 
-3. **Validate & Iterate**
-   - Test end-to-end flow
-   - Fix critical issues
-   - Gather feedback
+3. **Test & Validate**
+   - End-to-end testing
+   - Bug fixes
+   - User feedback
 
 ## Development Guidelines
-- Focus on working features over perfect architecture
-- Use simple, proven patterns
+- Keep the UI simple (HTML/JS only for now)
+- Focus on a working example
 - Document as we build
-- Test critical paths only 
+- Test critical paths 

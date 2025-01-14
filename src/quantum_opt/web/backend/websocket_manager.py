@@ -4,233 +4,266 @@ This module provides a centralized manager for WebSocket connections, handling
 client connections, disconnections, message broadcasting, and reconnection logic.
 It integrates with the task queue to provide real-time updates about optimization
 progress to connected clients.
-
-The manager implements exponential backoff for reconnection attempts and provides
-a buffering mechanism for events to ensure clients don't miss updates during
-brief disconnections.
-
-Example:
-    manager = WebSocketManager()
-    manager.initialize_queue(task_queue)
-    
-    # In FastAPI endpoint
-    @app.websocket("/ws")
-    async def websocket_endpoint(websocket: WebSocket):
-        await manager.connect(websocket)
-        try:
-            while True:
-                data = await websocket.receive_json()
-                await manager.handle_client_message(websocket, data)
-        except WebSocketDisconnect:
-            await manager.disconnect(websocket)
 """
 import asyncio
 import logging
 from typing import Dict, Set, Any, Optional, List
 from fastapi import WebSocket, WebSocketDisconnect
+from pydantic import ValidationError
 
 from ...queue import TaskQueue
 from ...utils.events import EventEmitter, Event, EventType, create_api_response
 
 logger = logging.getLogger(__name__)
 
-class WebSocketManager(EventEmitter):
-    """Manager for WebSocket connections and real-time updates.
+class WebSocketManager:
+    """Manages WebSocket connections and message broadcasting."""
     
-    This class manages WebSocket connections, handles client messages,
-    and broadcasts optimization updates to connected clients. It includes
-    reconnection logic with exponential backoff and event buffering.
-    
-    Attributes:
-        _connections (Set[WebSocket]): Set of active WebSocket connections
-        _reconnect_attempts (Dict[str, int]): Number of reconnection attempts per client
-        _reconnect_delay (float): Base delay for reconnection attempts
-        _max_reconnect_attempts (int): Maximum number of reconnection attempts
-        _task_queue (Optional[TaskQueue]): Reference to the task queue
-        _event_buffer (List[Dict]): Buffer of recent events for reconnecting clients
-    """
-    
-    def __init__(self) -> None:
+    def __init__(self):
         """Initialize the WebSocket manager."""
-        super().__init__()
-        self._connections: Set[WebSocket] = set()
-        self._reconnect_attempts: Dict[str, int] = {}
-        self._reconnect_delay = 1.0  # Base delay in seconds
-        self._max_reconnect_attempts = 5
+        self._connections: Dict[str, WebSocket] = {}
         self._task_queue: Optional[TaskQueue] = None
-        self._event_buffer = []
+        self._event_buffer: List[Dict[str, Any]] = []
+        self._buffer_size = 100  # Keep last 100 events
         
     def initialize_queue(self, task_queue: TaskQueue) -> None:
-        """Initialize the task queue reference and subscribe to events.
+        """Initialize with a TaskQueue and set up event handlers.
         
         Args:
-            task_queue: The TaskQueue instance to monitor for events.
+            task_queue: The TaskQueue instance to monitor
         """
+        # Clear any existing subscribers if reinitializing
+        if self._task_queue:
+            self._task_queue.remove_subscriber(self._handle_queue_event)
+            
         self._task_queue = task_queue
+        # TaskQueue inherits from EventEmitter, so we can subscribe directly
         task_queue.add_subscriber(self._handle_queue_event)
         logger.info("WebSocket manager initialized with task queue")
         
     async def connect(self, websocket: WebSocket, client_id: str) -> None:
-        """Accept a new WebSocket connection.
-        
-        This method accepts the connection, sends the initial state,
-        and sets up event handling for the client.
+        """Register a new WebSocket connection.
         
         Args:
-            websocket: The WebSocket connection to accept
+            websocket: The WebSocket connection to register
             client_id: Unique identifier for the client
-            
-        Raises:
-            RuntimeError: If task queue is not initialized
         """
-        if not self._task_queue:
-            logger.error("Task queue not initialized in WebSocket manager")
-            raise RuntimeError("Task queue not initialized")
+        # Clean up any existing connection for this client
+        if client_id in self._connections:
+            logger.warning(f"Client {client_id} already connected, closing old connection")
+            try:
+                old_websocket = self._connections[client_id]
+                await old_websocket.close()
+                del self._connections[client_id]
+            except Exception as e:
+                logger.error(f"Error closing old connection for client {client_id}: {e}")
+                
+        self._connections[client_id] = websocket
+        logger.info(f"Client {client_id} connected. Total connections: {len(self._connections)}")
+        
+        # Send buffered events
+        for event in self._event_buffer:
+            try:
+                await websocket.send_json(event)
+            except Exception as e:
+                logger.error(f"Error sending buffered event to client {client_id}: {e}")
+                
+    async def disconnect(self, websocket: WebSocket, client_id: str) -> None:
+        """Remove a WebSocket connection.
+        
+        Args:
+            websocket: The WebSocket connection to remove
+            client_id: The client ID to disconnect
+        """
+        if client_id in self._connections:
+            # Only remove if this is the current connection for this client
+            if self._connections[client_id] == websocket:
+                del self._connections[client_id]
+                logger.info(f"Client {client_id} disconnected. Remaining connections: {len(self._connections)}")
             
         try:
-            logger.info(f"Adding client {client_id} to WebSocket connections")
-            self._connections.add(websocket)
-            self._reconnect_attempts[client_id] = 0
+            await websocket.close()
+        except:
+            pass
             
-            # Send initial state
-            tasks = await self._task_queue.list_tasks()
-            queue_status = {
-                "active_task_id": self._task_queue._current_task,
-                "task_count": len(tasks),
-                "is_processing": self._task_queue.is_processing,
-                "is_paused": self._task_queue.is_paused
-            }
+        # Stop task processing if no more connections
+        if not self._connections and self._task_queue:
+            logger.info("No more connections, pausing task queue")
+            await self._task_queue.pause_processing()
             
-            logger.debug(f"Initial state for client {client_id}: {queue_status}")
-            await websocket.send_json(
-                create_api_response(
-                    status="success",
-                    data={
-                        "type": "INITIAL_STATE",
-                        "tasks": tasks,
-                        "queue_status": queue_status
-                    }
-                )
-            )
-            logger.info(f"Client {client_id} successfully connected")
-        except Exception as e:
-            logger.error(f"Error connecting client {client_id}: {e}", exc_info=True)
-            if websocket in self._connections:
-                self._connections.remove(websocket)
-            raise
-        
-    async def disconnect(self, websocket: WebSocket, client_id: str) -> None:
-        """Handle client disconnection.
-        
-        This method removes the connection and updates reconnection tracking.
-        
-        Args:
-            websocket: The WebSocket connection that disconnected
-            client_id: Unique identifier for the client
-        """
-        self._connections.remove(websocket)
-        
-        # Update reconnection attempts
-        if client_id in self._reconnect_attempts:
-            self._reconnect_attempts[client_id] += 1
-            if self._reconnect_attempts[client_id] >= self._max_reconnect_attempts:
-                del self._reconnect_attempts[client_id]
-                logger.info(f"Client {client_id} exceeded max reconnection attempts")
-        
-    async def broadcast(self, message: Dict[str, Any]) -> None:
-        """Broadcast a message to all connected clients.
-        
-        This method sends the message to all connected clients and handles
-        any disconnections that occur during sending.
-        
-        Args:
-            message: The message to broadcast to all clients
-        """
-        disconnected = set()
-        for connection in self._connections:
+    async def broadcast(self, event: Event) -> None:
+        """Broadcast an event to all connected clients."""
+        if not self._task_queue:
+            logger.error("Task queue not initialized")
+            return
+
+        # Convert event to JSON-serializable format
+        event_data = {
+            "type": event.type.value,  # Convert EventType enum to string
+            "task_id": event.task_id,
+            "timestamp": event.timestamp.isoformat(),
+            "data": event.data
+        }
+
+        for client_id, websocket in self._connections.items():
             try:
-                await connection.send_json(message)
-                logger.debug("Successfully sent message to client")
-            except WebSocketDisconnect:
-                logger.warning("Client disconnected during broadcast")
-                disconnected.add(connection)
+                await websocket.send_json(create_api_response(
+                    status="success",
+                    data=event_data
+                ))
             except Exception as e:
-                logger.error(f"Error broadcasting message: {e}", exc_info=True)
-                disconnected.add(connection)
-                
-        # Clean up disconnected clients
-        for connection in disconnected:
-            self._connections.remove(connection)
-            logger.info("Removed disconnected client")
+                logger.error(f"Error broadcasting to client {client_id}: {str(e)}")
+                # Don't remove client here, let the router handle disconnection
             
     async def _handle_queue_event(self, event: Event) -> None:
-        """Handle events from the task queue.
-        
-        This method processes events from the task queue and broadcasts
-        them to all connected clients.
-        
-        Args:
-            event: The event to process and broadcast
-        """
-        logger.debug(f"Received queue event: {event.to_dict()}")
-        # Add event to buffer
-        message = create_api_response(
-            status="success",
-            data=event.to_dict()
-        )
-        self._event_buffer.append(message)
-        if len(self._event_buffer) > 100:  # Keep last 100 events
-            self._event_buffer.pop(0)
-            
-        # Broadcast to all clients
-        logger.debug(f"Broadcasting event to {len(self._connections)} clients")
-        await self.broadcast(message)
-        
-    async def handle_client_message(self, websocket: WebSocket, message: Dict[str, Any]) -> None:
-        """Handle messages received from clients.
-        
-        This method processes messages from clients, including reconnection
-        requests and client-specific commands.
-        
-        Args:
-            websocket: The WebSocket connection that sent the message
-            message: The message received from the client
-            
-        Raises:
-            ValueError: If message format is invalid
-        """
+        """Handle events from the task queue."""
+        if not self._task_queue:
+            logger.error("Task queue not initialized")
+            return
+
         try:
-            message_type = message.get("type")
-            if not message_type:
-                raise ValueError("Message missing type field")
-                
-            if message_type == "RECONNECT":
-                client_id = message.get("client_id")
-                if not client_id:
-                    raise ValueError("Reconnect message missing client_id")
-                    
-                if client_id in self._reconnect_attempts:
-                    # Calculate backoff delay
-                    delay = self._reconnect_delay * (2 ** self._reconnect_attempts[client_id])
-                    await asyncio.sleep(delay)
-                    
-                    # Send buffered events
-                    for event in self._event_buffer:
-                        await websocket.send_json(event)
-            else:
-                # Handle other message types
-                await websocket.send_json(
-                    create_api_response(
-                        status="error",
-                        error={"message": f"Unknown message type: {message_type}"}
-                    )
-                )
-                
+            # Convert event to JSON-serializable format
+            event_data = {
+                "type": event.type.value,  # Use type.value consistently
+                "task_id": event.task_id,
+                "timestamp": event.timestamp.isoformat(),
+                "data": event.data
+            }
+
+            # Add to event buffer
+            self._event_buffer.append(event_data)
+            if len(self._event_buffer) > self._buffer_size:
+                self._event_buffer.pop(0)  # Remove oldest event
+
+            # Broadcast to all connected clients
+            for client_id, websocket in self._connections.items():
+                try:
+                    await websocket.send_json(create_api_response(
+                        status="success",
+                        data=event_data
+                    ))
+                except Exception as e:
+                    logger.error(f"Error broadcasting to client {client_id}: {str(e)}")
+                    # Don't remove client here, let the router handle disconnection
         except Exception as e:
-            logger.error(f"Error handling client message: {e}")
-            await websocket.send_json(
-                create_api_response(
+            logger.error(f"Error handling queue event: {str(e)}")
+            # Continue processing other events
+
+    async def handle_client_message(self, websocket: WebSocket, data: Dict[str, Any]) -> None:
+        """Handle a message from a client."""
+        if not self._task_queue:
+            logger.error("Task queue not initialized")
+            await websocket.send_json(create_api_response(
+                status="error",
+                error={"detail": "Task queue not initialized"}
+            ))
+            return
+
+        try:
+            message_type = data.get("type")
+            message_data = data.get("data", {})
+
+            if message_type == "CONTROL_TASK":
+                task_id = message_data.get("task_id")
+                action = message_data.get("action")
+
+                if not task_id or not action:
+                    await websocket.send_json(create_api_response(
+                        status="error",
+                        error={"detail": "Missing task_id or action in control message"}
+                    ))
+                    return
+
+                # Handle task control action
+                if action == "start":
+                    await self._task_queue.start_task(task_id)
+                elif action == "pause":
+                    await self._task_queue.pause_task(task_id)
+                elif action == "resume":
+                    await self._task_queue.resume_task(task_id)
+                elif action == "stop":
+                    await self._task_queue.stop_task(task_id)
+                else:
+                    await websocket.send_json(create_api_response(
+                        status="error",
+                        error={"detail": f"Invalid action: {action}"}
+                    ))
+                    return
+
+                # Send success response
+                await websocket.send_json(create_api_response(
+                    status="success",
+                    data={
+                        "type": "QUEUE_EVENT",
+                        "event_type": "TASK_CONTROL",
+                        "task_id": task_id,
+                        "action": action
+                    }
+                ))
+
+            elif message_type == "REQUEST_STATE":
+                # Get current state of all tasks
+                tasks = await self._task_queue.list_tasks()
+                await websocket.send_json(create_api_response(
+                    status="success",
+                    data={
+                        "type": "STATE_UPDATE",
+                        "tasks": tasks
+                    }
+                ))
+
+            else:
+                await websocket.send_json(create_api_response(
                     status="error",
-                    error={"message": str(e)}
+                    error={"detail": f"Invalid message type: {message_type}"}
+                ))
+
+        except Exception as e:
+            logger.error(f"Error handling client message: {str(e)}")
+            try:
+                error_response = create_api_response(
+                    status="error",
+                    error={"detail": f"Error handling message: {str(e)}"}
                 )
-            ) 
+                await websocket.send_json(error_response)
+            except Exception as e:
+                logger.error(f"Error sending error response: {str(e)}")
+                # Let the router handle disconnection
+
+    async def send_buffered_events(self, websocket: WebSocket, client_id: str) -> None:
+        """Send buffered events to a newly connected client."""
+        if not self._task_queue:
+            logger.error("Task queue not initialized")
+            return
+
+        for event in self._event_buffer:
+            try:
+                # Convert event to JSON-serializable format
+                event_data = {
+                    "type": event.type.value,  # Convert EventType enum to string
+                    "task_id": event.task_id,
+                    "timestamp": event.timestamp.isoformat(),
+                    "data": event.data
+                }
+                await websocket.send_json(create_api_response(
+                    status="success",
+                    data=event_data
+                ))
+            except Exception as e:
+                logger.error(f"Error sending buffered event to client {client_id}: {str(e)}")
+                # Don't remove client here, let the router handle disconnection 
+
+    async def cleanup_stale_connections(self) -> None:
+        """Clean up any stale connections."""
+        stale_clients = []
+        for client_id, websocket in self._connections.items():
+            try:
+                # Try to send a ping
+                await websocket.send_json({"type": "ping"})
+            except Exception as e:
+                logger.warning(f"Found stale connection for client {client_id}: {e}")
+                stale_clients.append((client_id, websocket))
+        
+        # Clean up stale connections
+        for client_id, websocket in stale_clients:
+            await self.disconnect(websocket, client_id) 

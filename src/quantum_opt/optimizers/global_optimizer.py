@@ -1,6 +1,7 @@
 """Global optimization using nevergrad."""
 import logging
 from typing import Dict, Any, Optional
+import asyncio
 
 import nevergrad as ng
 
@@ -21,6 +22,9 @@ class MultiprocessingGlobalOptimizer(BaseParallelOptimizer):
             task_id: Optional task ID for event tracking
         """
         super().__init__(config, task_id)
+        self._paused = False
+        self._pause_event = asyncio.Event()
+        self._pause_event.set()  # Not paused initially
         
     def _create_optimizer(self) -> ng.optimizers.base.Optimizer:
         """Create and return a nevergrad optimizer instance."""
@@ -75,6 +79,9 @@ class MultiprocessingGlobalOptimizer(BaseParallelOptimizer):
         Raises:
             Exception: If evaluation fails, the original error is propagated
         """
+        # Wait if paused
+        await self._pause_event.wait()
+        
         try:
             # Convert string to callable if needed
             fn = eval(self.config.objective_fn) if isinstance(self.config.objective_fn, str) else self.config.objective_fn
@@ -84,4 +91,40 @@ class MultiprocessingGlobalOptimizer(BaseParallelOptimizer):
         except Exception as e:
             logger.error(f"Error evaluating candidate: {str(e)}")
             # Re-raise the original exception to preserve the error message
-            raise e from None 
+            raise e from None
+            
+    async def pause(self) -> None:
+        """Pause the optimization process.
+        
+        This will pause after the current evaluation is complete.
+        """
+        if not self._paused:
+            self._paused = True
+            self._pause_event.clear()
+            logger.info("Optimization paused")
+            
+    async def resume(self) -> None:
+        """Resume the optimization process."""
+        if self._paused:
+            self._paused = False
+            self._pause_event.set()
+            logger.info("Optimization resumed")
+            
+    async def cleanup(self) -> None:
+        """Clean up resources used by the optimizer.
+        
+        This includes stopping any running processes and cleaning up multiprocessing resources.
+        """
+        # Ensure optimization is not paused
+        if self._paused:
+            await self.resume()
+            
+        # Clean up nevergrad optimizer resources
+        if hasattr(self, '_optimizer') and self._optimizer is not None:
+            # Cancel any pending evaluations
+            self._optimizer.tell_not_asked = None  # type: ignore
+            self._optimizer._asked = {}  # type: ignore
+            self._optimizer._num_ask = 0  # type: ignore
+            self._optimizer._num_tell = 0  # type: ignore
+            
+        logger.info("Optimizer resources cleaned up") 

@@ -1,0 +1,100 @@
+.simple-optimization {
+  max-width: 800px;
+  margin: 0 auto;
+  padding: 20px;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
+}
+
+.simple-optimization h1 {
+  color: #2c3e50;
+  text-align: center;
+  margin-bottom: 30px;
+}
+
+.simple-optimization .status {
+  background-color: #f8f9fa;
+  border-radius: 8px;
+  padding: 15px;
+  margin-bottom: 20px;
+}
+
+.simple-optimization .status p {
+  margin: 0;
+  color: #495057;
+}
+
+.simple-optimization .status .error {
+  color: #dc3545;
+  margin-top: 10px;
+}
+
+.simple-optimization .controls {
+  display: flex;
+  gap: 10px;
+  justify-content: center;
+  margin-bottom: 30px;
+}
+
+.simple-optimization button {
+  background-color: #007bff;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  padding: 10px 20px;
+  cursor: pointer;
+  transition: background-color 0.2s;
+}
+
+.simple-optimization button:hover {
+  background-color: #0056b3;
+}
+
+.simple-optimization button:disabled {
+  background-color: #6c757d;
+  cursor: not-allowed;
+}
+
+.simple-optimization .chart {
+  background-color: white;
+  border-radius: 8px;
+  padding: 20px;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+.simple-optimization .chart h2 {
+  color: #2c3e50;
+  text-align: center;
+  margin-bottom: 20px;
+}
+
+/* Status-specific colors */
+.simple-optimization[data-status="connected"] .status {
+  border-left: 4px solid #28a745;
+}
+
+.simple-optimization[data-status="disconnected"] .status {
+  border-left: 4px solid #dc3545;
+}
+
+.simple-optimization[data-status="running"] .status {
+  border-left: 4px solid #007bff;
+}
+
+.simple-optimization[data-status="paused"] .status {
+  border-left: 4px solid #ffc107;
+}
+
+/* Responsive design */
+@media (max-width: 600px) {
+  .simple-optimization {
+    padding: 10px;
+  }
+  
+  .simple-optimization .controls {
+    flex-direction: column;
+  }
+  
+  .simple-optimization button {
+    width: 100%;
+  }
+} 

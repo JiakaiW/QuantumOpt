@@ -51,8 +51,16 @@ def test_task_config():
         return x * x
     
     config = TaskConfig(
-        parameter_config={"x": {"min": 0, "max": 1}},
-        optimizer_config={"type": "nevergrad", "budget": 100},
+        parameter_config={"x": {
+            "lower_bound": 0,
+            "upper_bound": 1,
+            "scale": "linear"
+        }},
+        optimizer_config={
+            "optimizer_type": "CMA",
+            "budget": 100,
+            "num_workers": 1
+        },
         execution_config={"max_retries": 3},
         objective_fn=dummy_objective
     )
@@ -70,8 +78,16 @@ def test_task_state():
         return x * x
     
     config = TaskConfig(
-        parameter_config={"x": {"min": 0, "max": 1}},
-        optimizer_config={"type": "nevergrad", "budget": 100},
+        parameter_config={"x": {
+            "lower_bound": 0,
+            "upper_bound": 1,
+            "scale": "linear"
+        }},
+        optimizer_config={
+            "optimizer_type": "CMA",
+            "budget": 100,
+            "num_workers": 1
+        },
         execution_config={"max_retries": 3},
         objective_fn=dummy_objective
     )
@@ -114,13 +130,13 @@ def test_event_creation():
         data={"status": "running"}
     )
     
-    assert event.type == EventType.TASK_STARTED
+    assert event.event_type == EventType.TASK_STARTED
     assert event.task_id == "test-task"
     assert event.data == {"status": "running"}
     
     # Test to_dict method
     event_dict = event.to_dict()
-    assert event_dict["type"] == EventType.TASK_STARTED.name
+    assert event_dict["event_type"] == EventType.TASK_STARTED.name
     assert event_dict["task_id"] == "test-task"
     assert event_dict["data"] == {"status": "running"}
 
@@ -153,7 +169,7 @@ async def test_event_emitter():
     
     # Both handlers should have received the event
     assert len(events) == 2
-    assert all(e.type == EventType.TASK_STARTED for e in events)
+    assert all(e.event_type == EventType.TASK_STARTED for e in events)
     assert all(e.task_id == "test-task" for e in events)
 
 def test_event_creation_helpers():
@@ -164,7 +180,7 @@ def test_event_creation_helpers():
         task_id="test-task",
         status="running"
     )
-    assert task_event.type == EventType.TASK_STARTED
+    assert task_event.event_type == EventType.TASK_STARTED
     assert task_event.task_id == "test-task"
     assert task_event.data["status"] == "running"
     
@@ -175,7 +191,7 @@ def test_event_creation_helpers():
         iteration=10,
         value=0.5
     )
-    assert opt_event.type == EventType.ITERATION_COMPLETED
+    assert opt_event.event_type == EventType.ITERATION_COMPLETED
     assert opt_event.task_id == "test-task"
     assert opt_event.data["iteration"] == 10
     assert opt_event.data["value"] == 0.5
@@ -186,7 +202,7 @@ def test_event_creation_helpers():
         message="Test error",
         code=500
     )
-    assert sys_event.type == EventType.ERROR
+    assert sys_event.event_type == EventType.ERROR
     assert sys_event.data["message"] == "Test error"
     assert sys_event.data["code"] == 500
     
@@ -195,7 +211,7 @@ def test_event_creation_helpers():
         event_type=EventType.QUEUE_STARTED,
         task_count=5
     )
-    assert queue_event.type == EventType.QUEUE_STARTED
+    assert queue_event.event_type == EventType.QUEUE_STARTED
     assert queue_event.data["task_count"] == 5
 
 def test_api_response_helper():
